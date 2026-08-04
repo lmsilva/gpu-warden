@@ -58,7 +58,7 @@ func parseConfig() config {
 	flag.StringVar(&c.serveAddr, "serve", "", "if set (e.g. :9410), expose /metrics instead of printing a table")
 	flag.DurationVar(&c.watch, "watch", 0, "refresh interval for top mode (0 = print once)")
 	flag.BoolVar(&c.act, "act", false, "emit Kubernetes Events for zombie findings")
-	flag.Float64Var(&c.zombiePct, "zombie-threshold", 5, "GPU util %% below which a job may be a zombie")
+	flag.Float64Var(&c.zombiePct, "zombie-threshold", 5, "GPU util % below which a job may be a zombie")
 	flag.DurationVar(&c.zombieWin, "zombie-window", 15*time.Minute, "sustained window for zombie judgment")
 	flag.Float64Var(&c.dollarRate, "dollar-rate", 0, "optional $/GPU-hour for waste costing")
 	flag.Parse()
