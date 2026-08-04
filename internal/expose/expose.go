@@ -21,13 +21,13 @@ func Write(w io.Writer, reports []report.JobReport) {
 	fmt.Fprintln(w, "# TYPE warden_job_gpu_utilization_percent gauge")
 	for _, r := range reports {
 		fmt.Fprintf(w, "warden_job_gpu_utilization_percent{job_id=\"%d\",user=\"%s\",partition=\"%s\"} %.2f\n",
-			r.Job.JobID, esc(r.Job.UserName), esc(r.Job.Partition), r.AvgUtil)
+			r.Job.JobID, esc(r.Job.Owner()), esc(r.Job.Partition), r.AvgUtil)
 	}
 	fmt.Fprintln(w, "# HELP warden_job_gpu_hours_wasted Allocated-but-unused GPU-hours per running job.")
 	fmt.Fprintln(w, "# TYPE warden_job_gpu_hours_wasted gauge")
 	for _, r := range reports {
 		fmt.Fprintf(w, "warden_job_gpu_hours_wasted{job_id=\"%d\",user=\"%s\"} %.2f\n",
-			r.Job.JobID, esc(r.Job.UserName), r.WastedH)
+			r.Job.JobID, esc(r.Job.Owner()), r.WastedH)
 	}
 	fmt.Fprintln(w, "# HELP warden_job_zombie 1 if the job is judged a zombie allocation.")
 	fmt.Fprintln(w, "# TYPE warden_job_zombie gauge")
@@ -36,6 +36,6 @@ func Write(w io.Writer, reports []report.JobReport) {
 		if r.Zombie {
 			z = 1
 		}
-		fmt.Fprintf(w, "warden_job_zombie{job_id=\"%d\",user=\"%s\"} %d\n", r.Job.JobID, esc(r.Job.UserName), z)
+		fmt.Fprintf(w, "warden_job_zombie{job_id=\"%d\",user=\"%s\"} %d\n", r.Job.JobID, esc(r.Job.Owner()), z)
 	}
 }
