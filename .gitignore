@@ -216,3 +216,26 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Credentials — .warden-env holds a live Slurm JWT
+.warden-env
+.env
+*.pem
+*.key
+
+# Compiled binary (go build drops it in the repo root)
+/warden
+
+# Local Go toolchain / caches, if any ever land here
+.go/
+.toolchain/
+
+# Editor and OS noise
+.vscode/
+.idea/
+.DS_Store
+
+# Test and profiling output
+*.out
+*.test
+coverage.*
