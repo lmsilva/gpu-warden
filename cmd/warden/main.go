@@ -176,6 +176,7 @@ func runCycle(ctx context.Context, b *report.Builder, kc *kube.Client, c config)
 func printTable(out io.Writer, reports []report.JobReport, c config) {
 	// tabwriter buffers: nothing prints until Flush.
 	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+	anyPodWide := false
 	fmt.Fprintln(w, "JOBID\tNAME\tUSER\tGPUS\tELAPSED\tAVG%\tPEAK%\tWASTED-GPU-H\tVERDICT")
 	for _, r := range reports {
 		verdict := "ok"
@@ -188,15 +189,27 @@ func printTable(out io.Writer, reports []report.JobReport, c config) {
 		if c.dollarRate > 0 {
 			cost = fmt.Sprintf("%.1f ($%.2f)", r.WastedH, r.WastedH*c.dollarRate)
 		}
-		fmt.Fprintf(w, "%d\t%s\t%s\t%d\t%s\t%.0f\t%.0f\t%s\t%s\n",
-			r.Job.JobID, r.Job.Name, r.Job.Owner(), r.GPUs,
+		// A job whose telemetry could not be scoped to its own GPU devices is
+		// marked, because on a shared node those numbers include a
+		// neighbour's work. Silently printing them as if they were the job's
+		// own is the failure this column exists to prevent.
+		gpus := fmt.Sprintf("%d", r.GPUs)
+		if !r.PerGPU {
+			gpus += "*"
+			anyPodWide = true
+		}
+		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%.0f\t%.0f\t%s\t%s\n",
+			r.Job.JobID, r.Job.Name, r.Job.Owner(), gpus,
 			r.Elapsed.Round(time.Minute), r.AvgUtil, r.PeakUtil, cost, verdict)
 	}
 	w.Flush()
+	if anyPodWide {
+		fmt.Fprintln(out, "\n* GPU indices unavailable (no gres_detail): telemetry covers every GPU on the job's nodes.")
+	}
 }
 
 // stamped remembers when each job was last Evented, so --watch mode does not
-// re-stamp the same job every cycle. 
+// re-stamp the same job every cycle.
 var stamped = map[int]time.Time{}
 
 // actOnZombies emits one Kubernetes Event per zombie job, on the worker pod
