@@ -3,6 +3,7 @@ package slurmapi
 import (
 	"reflect"
 	"testing"
+	"strings"
 )
 
 func TestGPUCount(t *testing.T) {
@@ -73,6 +74,73 @@ func TestExpandNodes(t *testing.T) {
 			}
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("ExpandNodes(%q) = %v, want %v", tt.nodes, got, tt.want)
+			}
+		})
+	}
+}
+
+// test for gpu indices parsing!
+func TestGPUIndices(t *testing.T) {
+	cases := []struct {
+		name string
+		job  Job
+		want map[string][]string
+	}{
+		{
+			name: "single node, single gpu",
+			job:  Job{Nodes: "gpu-0", GresDetail: []string{"gpu:1(IDX:0)"}},
+			want: map[string][]string{"gpu-0": {"0"}},
+		},
+		{
+			name: "range of devices",
+			job:  Job{Nodes: "gpu-0", GresDetail: []string{"gpu:2(IDX:0-1)"}},
+			want: map[string][]string{"gpu-0": {"0", "1"}},
+		},
+		{
+			name: "mixed singles and ranges",
+			job:  Job{Nodes: "gpu-0", GresDetail: []string{"gpu:3(IDX:0,2-3)"}},
+			want: map[string][]string{"gpu-0": {"0", "2", "3"}},
+		},
+		{
+			name: "typed gres still parses",
+			job:  Job{Nodes: "gpu-0", GresDetail: []string{"gpu:tesla:2(IDX:2-3)"}},
+			want: map[string][]string{"gpu-0": {"2", "3"}},
+		},
+		{
+			// The case that matters: two nodes, DIFFERENT devices on each.
+			name: "multi-node with differing index sets",
+			job: Job{Nodes: "gpu-[0-1]",
+				GresDetail: []string{"gpu:2(IDX:0-1)", "gpu:1(IDX:3)"}},
+			want: map[string][]string{"gpu-0": {"0", "1"}, "gpu-1": {"3"}},
+		},
+		{
+			name: "no gres_detail falls back to nil, never to empty",
+			job:  Job{Nodes: "gpu-0", TresAlloc: "cpu=4,gres/gpu=1"},
+			want: nil,
+		},
+		{
+			name: "gres_detail without IDX falls back",
+			job:  Job{Nodes: "gpu-0", GresDetail: []string{"gpu:1"}},
+			want: nil,
+		},
+		{
+			// A disagreement between the two fields must never be guessed at:
+			// mis-aligning them attributes one node's GPUs to another node.
+			name: "node/detail length mismatch falls back",
+			job:  Job{Nodes: "gpu-[0-1]", GresDetail: []string{"gpu:1(IDX:0)"}},
+			want: nil,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := GPUIndices(tc.job)
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+			for node, idx := range tc.want {
+				if strings.Join(got[node], ",") != strings.Join(idx, ",") {
+					t.Errorf("node %s: got %v, want %v", node, got[node], idx)
+				}
 			}
 		})
 	}
