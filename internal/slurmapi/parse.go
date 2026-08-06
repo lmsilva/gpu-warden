@@ -15,6 +15,84 @@ import (
 // without consuming the digits.
 var gpuNum = regexp.MustCompile(`gpu(?::[^:=,()]+)?[:=]([0-9]+)`)
 
+// idxSpec captures the device list inside a gres_detail entry: the "0-1" in
+// "gpu:2(IDX:0-1)". Slurm writes indices as a comma-separated list of single
+// devices and inclusive ranges, e.g. "IDX:0,2-3".
+var idxSpec = regexp.MustCompile(`IDX:([0-9,\-]+)`)
+
+// GPUIndices maps each Slurm node name a job holds to the GPU device indices
+// allocated to that job ON that node.
+//
+// DCGM publishes one series per physical GPU, labelled with the device index; 
+// without this map, a query scoped only by pod name reads EVERY GPU on the node, 
+// so a job sitting idle on GPUs 0-1 inherits the utilization of whatever else is 
+// running on GPUs 2-3. On a single-GPU node the distinction does not exist, 
+// which is exactly why the bug survives a single-GPU lab.
+//
+// The source is gres_detail, which Slurm reports as one entry per allocated
+// node, in the same order as the job's node list:
+//
+//	nodes:       "gpu-[0-1]"
+//	gres_detail: ["gpu:2(IDX:0-1)", "gpu:1(IDX:3)"]
+//	result:      {"gpu-0": ["0","1"], "gpu-1": ["3"]}
+//
+// Returns nil when the indices cannot be determined — gres_detail absent, a
+// length mismatch against the node list, or no IDX field. Callers MUST treat
+// nil as "scope by pod only and say so", never as "no GPUs".
+func GPUIndices(j Job) map[string][]string {
+	if len(j.GresDetail) == 0 {
+		return nil
+	}
+	nodes, err := ExpandNodes(j.Nodes)
+	if err != nil || len(nodes) == 0 {
+		return nil
+	}
+	// A mismatch means the two fields disagree about the allocation's shape.
+	// Guessing an alignment would silently attribute one node's telemetry to
+	// another, so refuse and fall back.
+	if len(nodes) != len(j.GresDetail) {
+		return nil
+	}
+	out := make(map[string][]string, len(nodes))
+	for i, node := range nodes {
+		idx := parseIndices(j.GresDetail[i])
+		if len(idx) == 0 {
+			return nil // partial knowledge is worse than none: fall back wholesale
+		}
+		out[node] = idx
+	}
+	return out
+}
+
+// parseIndices expands one gres_detail entry's IDX field into device indices.
+// "gpu:4(IDX:0,2-3)" yields ["0","2","3"].
+func parseIndices(entry string) []string {
+	m := idxSpec.FindStringSubmatch(entry)
+	if m == nil {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(m[1], ",") {
+		lo, hi, isRange := strings.Cut(part, "-")
+		if !isRange {
+			if _, err := strconv.Atoi(part); err != nil {
+				return nil
+			}
+			out = append(out, part)
+			continue
+		}
+		start, err1 := strconv.Atoi(lo)
+		end, err2 := strconv.Atoi(hi)
+		if err1 != nil || err2 != nil || end < start {
+			return nil
+		}
+		for n := start; n <= end; n++ {
+			out = append(out, strconv.Itoa(n))
+		}
+	}
+	return out
+}
+
 // gpusIn sums every GPU count appearing in s.
 func gpusIn(s string) int {
 	total := 0
