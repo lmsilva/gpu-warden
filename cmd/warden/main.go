@@ -20,7 +20,9 @@ import (
 	"github.com/lmsilva/gpu-warden/internal/slurmapi"
 )
 
-// cycleTimeout bounds one build of the reports, in either mode.
+// cycleTimeout bounds one build of the reports, in either mode. The server's
+// WriteTimeout must stay comfortably above it, or a slow cluster would be cut
+// off mid-response rather than returning an honest 500.
 const cycleTimeout = 30 * time.Second
 
 type config struct {
@@ -100,7 +102,11 @@ func main() {
 		if c.watch > 0 {
 			fmt.Println("note: --watch is ignored with --serve; Prometheus sets the cadence")
 		}
-		http.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		// A private mux, not http.DefaultServeMux. The default mux is process
+		// global, so any dependency registering a handler in its init would be
+		// served on this port too.
+		mux := http.NewServeMux()
+		mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 			// Derive from the request, not Background: a scrape Prometheus
 			// abandons cancels warden's in-flight calls instead of leaving them
 			// to finish into a closed connection.
@@ -117,8 +123,19 @@ func main() {
 			expose.Write(w, reports)
 		})
 
+		// Explicit timeouts. without them, ListenAndServe leaves all of these at zero,
+		// meaning no limit, so a client sending headers slowly can hold a
+		// connection open forever.
+		srv := &http.Server{
+			Addr:              c.serveAddr,
+			Handler:           mux,
+			ReadHeaderTimeout: 10 * time.Second,
+			ReadTimeout:       15 * time.Second,
+			WriteTimeout:      cycleTimeout + 60*time.Second,
+			IdleTimeout:       60 * time.Second,
+		}
 		fmt.Println("serving /metrics on", c.serveAddr)
-		if err := http.ListenAndServe(c.serveAddr, nil); err != nil {
+		if err := srv.ListenAndServe(); err != nil {
 			fmt.Println("error:", err)
 			os.Exit(1)
 		}
@@ -198,7 +215,7 @@ func printTable(out io.Writer, reports []report.JobReport, c config) {
 		// A job whose telemetry could not be scoped to its own GPU devices is
 		// marked, because on a shared node those numbers include a
 		// neighbour's work. Silently printing them as if they were the job's
-		// own is the failure this column exists to prevent.
+		// own is the failure this column exists to prevent!
 		gpus := fmt.Sprintf("%d", r.GPUs)
 		if !r.PerGPU {
 			gpus += "*"
@@ -215,14 +232,9 @@ func printTable(out io.Writer, reports []report.JobReport, c config) {
 }
 
 // eventLog remembers when each job was last Evented, so a job is not
-// re-stamped every cycle.
-//
-// It carries a mutex because --serve and --act compose: in serve mode
-// actOnZombies runs inside an HTTP handler, and net/http runs handlers
-// concurrently. Two overlapping scrapes against a bare map produce
-// "fatal error: concurrent map writes" - an unrecoverable panic that no
-// recover() can catch, which means anyone able to reach /metrics could crash
-// warden on demand.
+// re-stamped every cycle. The mutex is required because --serve runs
+// actOnZombies inside an HTTP handler, and net/http runs handlers
+// concurrently: a bare map here would crash the process.
 type eventLog struct {
 	mu   sync.Mutex
 	seen map[int]time.Time
@@ -233,22 +245,11 @@ func newEventLog() *eventLog {
 }
 
 // claim reports whether this job should be Evented now, and records the
-// attempt if so.
+// attempt if so. One method rather than a separate check and record: split
+// in two, both scrapes could pass the check and both emit for one job.
 //
-// Checking and recording happen under one lock on purpose. Splitting them into
-// a separate "should I?" and "I did" would let two concurrent scrapes both
-// pass the check and both emit an Event for the same job - a race that is
-// invisible in single-threaded --watch mode and appears only under --serve.
-//
-// Note this records the attempt before the Event is created, so a failed emit
-// consumes the window rather than retrying immediately. That is the safer
-// direction for something that writes to the cluster: at most one Event per
-// job per window, even when things are going wrong.
-//
-// Its call site is deliberate for the same reason in reverse: the caller
-// claims only after it has resolved the job's pod, so a job skipped over a
-// worker that was merely mid-restart - where no Event was ever attempted - is
-// reconsidered next cycle instead of being silenced for a window.
+// It records before the Event is created, so a failed emit consumes the
+// window. At-most-once is the safer direction for a cluster write.
 func (e *eventLog) claim(jobID int, win time.Duration) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -282,10 +283,9 @@ func actOnZombies(ctx context.Context, kc *kube.Client, reports []report.JobRepo
 			fmt.Printf("job %d: no pod for slurm node %q, skipping event\n", r.Job.JobID, slurmNodes[0])
 			continue
 		}
-		// Claimed here, not at the top of the loop: the two skips above are
-		// transient conditions where no Event was ever attempted, and claiming
-		// before them would silence the job for a whole window over a worker
-		// that was merely mid-restart.
+		// Claimed after the pod is resolved, not at the top of the loop: the
+		// skips above are transient, and claiming first would silence the job
+		// for a window without ever having tried.
 		if !ev.claim(r.Job.JobID, win) {
 			continue // already warned about this job within the window
 		}
