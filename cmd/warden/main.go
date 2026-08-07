@@ -33,6 +33,7 @@ type config struct {
 	kubeconfig string
 	namespace  string
 	serveAddr  string
+	serveCache time.Duration
 	watch      time.Duration
 	act        bool
 	zombiePct  float64
@@ -62,6 +63,7 @@ func parseConfig() config {
 	flag.StringVar(&c.podHostLabel, "pod-hostname-label", envOr("WARDEN_POD_HOSTNAME_LABEL", "nodeset.slinky.slurm.net/pod-hostname"), "pod label carrying the Slurm node name")
 	flag.StringVar(&c.podMetricLabel, "pod-label", envOr("WARDEN_POD_LABEL", "exported_pod"), "DCGM metric label carrying the pod name")
 	flag.StringVar(&c.serveAddr, "serve", "", "if set (e.g. :9410), expose /metrics instead of printing a table")
+	flag.DurationVar(&c.serveCache, "serve-cache", 30*time.Second, "minimum age of a cached build before /metrics rebuilds (0 disables)")
 	flag.DurationVar(&c.watch, "watch", 0, "refresh interval for top mode (0 = print once)")
 	flag.BoolVar(&c.act, "act", false, "emit Kubernetes Events for zombie findings")
 	flag.Float64Var(&c.zombiePct, "zombie-threshold", 5, "GPU util % below which a job may be a zombie")
@@ -102,6 +104,8 @@ func main() {
 		if c.watch > 0 {
 			fmt.Println("note: --watch is ignored with --serve; Prometheus sets the cadence")
 		}
+		cache := newCycleCache(c.serveCache)
+
 		// A private mux, not http.DefaultServeMux. The default mux is process
 		// global, so any dependency registering a handler in its init would be
 		// served on this port too.
@@ -112,7 +116,9 @@ func main() {
 			// to finish into a closed connection.
 			ctx, cancel := context.WithTimeout(r.Context(), cycleTimeout)
 			defer cancel()
-			reports, err := runCycle(ctx, b, kc, c, ev)
+			reports, err := cache.get(ctx, func(ctx context.Context) ([]report.JobReport, error) {
+				return runCycle(ctx, b, kc, c, ev)
+			})
 			if err != nil {
 				// 500 rather than a partial body: Prometheus will mark the target
 				// down instead of thinking no jobs are running if we do not return anything
@@ -177,6 +183,59 @@ func main() {
 			return
 		}
 	}
+}
+
+// cycleCache serves the last successful build to any scrape arriving within
+// minAge of it. Without it every scrape runs a full fan-out across Slurm,
+// Kubernetes and Prometheus, so an unauthenticated caller in a loop amplifies
+// into those services rather than into warden.
+//
+// sem is a one-slot channel used as a lock, held across the build on purpose:
+// a scrape arriving mid-build waits, then finds the cache fresh and returns
+// without querying anything. One build, however many scrapers.
+//
+// It is a channel rather than a sync.Mutex because a mutex cannot be given up.
+// Prometheus abandons a scrape after its own timeout, which is shorter than
+// cycleTimeout, and a waiter blocked on a mutex would keep waiting for a
+// client that has already gone.
+type cycleCache struct {
+	sem     chan struct{}
+	minAge  time.Duration
+	at      time.Time
+	reports []report.JobReport
+}
+
+// newCycleCache is required rather than optional: a nil channel blocks
+// forever, so a zero-value cycleCache would hang the first scrape.
+func newCycleCache(minAge time.Duration) *cycleCache {
+	return &cycleCache{sem: make(chan struct{}, 1), minAge: minAge}
+}
+
+// get returns a cached build if one is younger than minAge, otherwise builds
+// a fresh one. Errors are never cached: one transient Slurm hiccup must not
+// buy minAge of silence.
+//
+// Freshness is judged by the timestamp, never by the slice. report.Build
+// returns nil when no GPU jobs are running, so a c.reports != nil test would
+// never cache anything on an idle cluster.
+func (c *cycleCache) get(ctx context.Context, build func(context.Context) ([]report.JobReport, error)) ([]report.JobReport, error) {
+	// Taking the slot is the lock. The ctx case is what a mutex cannot do:
+	// a scrape whose client has given up stops waiting and returns.
+	select {
+	case c.sem <- struct{}{}:
+		defer func() { <-c.sem }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	if !c.at.IsZero() && time.Since(c.at) < c.minAge {
+		return c.reports, nil
+	}
+	reports, err := build(ctx)
+	if err != nil {
+		return nil, err
+	}
+	c.at, c.reports = time.Now(), reports
+	return reports, nil
 }
 
 // runCycle builds the reports and, when --act is set, emits Events. Both output
