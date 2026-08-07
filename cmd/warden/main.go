@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -18,6 +19,9 @@ import (
 	"github.com/lmsilva/gpu-warden/internal/report"
 	"github.com/lmsilva/gpu-warden/internal/slurmapi"
 )
+
+// cycleTimeout bounds one build of the reports, in either mode.
+const cycleTimeout = 30 * time.Second
 
 type config struct {
 	slurmURL   string
@@ -49,7 +53,7 @@ func parseConfig() config {
 	flag.StringVar(&c.slurmURL, "slurm-url", envOr("WARDEN_SLURM_URL", "http://localhost:6820"), "slurmrestd base URL")
 	flag.StringVar(&c.slurmVer, "slurm-api", envOr("WARDEN_SLURM_API", "v0.0.44"), "slurmrestd API version")
 	flag.StringVar(&c.promURL, "prom-url", envOr("WARDEN_PROM_URL", "http://localhost:9090"), "Prometheus base URL")
-	flag.StringVar(&c.kubeconfig, "kubeconfig", os.Getenv("KUBECONFIG"), "kubeconfig path (default: ~/.kube/config)")
+	flag.StringVar(&c.kubeconfig, "kubeconfig", os.Getenv("KUBECONFIG"), "kubeconfig path (default: in-cluster if in a pod, else ~/.kube/config)")
 	flag.StringVar(&c.namespace, "namespace", envOr("WARDEN_NAMESPACE", "slurm"), "namespace of Slurm worker pods")
 	// podHostLabel is on the POD (Kubernetes) and carries the Slurm node name.
 	// podMetricLabel is on the DCGM SERIES (Prometheus) and carries the pod name.
@@ -88,9 +92,10 @@ func main() {
 		ZombieWin: c.zombieWin,
 	}
 
-	// --serve turns warden into an exporter. Build runs per scrape rather than
-	// on a ticker: Prometheus decides the cadence so the data is calculated
-	// when Prometheus asks for it!
+	// One event log for the process lifetime, shared by every cycle.
+	ev := newEventLog()
+
+	// --serve turns warden into an exporter.
 	if c.serveAddr != "" {
 		if c.watch > 0 {
 			fmt.Println("note: --watch is ignored with --serve; Prometheus sets the cadence")
@@ -99,9 +104,9 @@ func main() {
 			// Derive from the request, not Background: a scrape Prometheus
 			// abandons cancels warden's in-flight calls instead of leaving them
 			// to finish into a closed connection.
-			ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+			ctx, cancel := context.WithTimeout(r.Context(), cycleTimeout)
 			defer cancel()
-			reports, err := runCycle(ctx, b, kc, c)
+			reports, err := runCycle(ctx, b, kc, c, ev)
 			if err != nil {
 				// 500 rather than a partial body: Prometheus will mark the target
 				// down instead of thinking no jobs are running if we do not return anything
@@ -111,6 +116,7 @@ func main() {
 			w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 			expose.Write(w, reports)
 		})
+
 		fmt.Println("serving /metrics on", c.serveAddr)
 		if err := http.ListenAndServe(c.serveAddr, nil); err != nil {
 			fmt.Println("error:", err)
@@ -126,8 +132,8 @@ func main() {
 
 	// One loop that serves both modes: --watch 0 runs the body once and returns.
 	for {
-		cycleCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		reports, err := runCycle(cycleCtx, b, kc, c)
+		cycleCtx, cancel := context.WithTimeout(ctx, cycleTimeout)
+		reports, err := runCycle(cycleCtx, b, kc, c, ev)
 		cancel()
 
 		if err != nil {
@@ -159,13 +165,13 @@ func main() {
 // runCycle builds the reports and, when --act is set, emits Events. Both output
 // modes go through this single function, which is what lets --serve and --act
 // compose without duplicating the decision logic.
-func runCycle(ctx context.Context, b *report.Builder, kc *kube.Client, c config) ([]report.JobReport, error) {
+func runCycle(ctx context.Context, b *report.Builder, kc *kube.Client, c config, ev *eventLog) ([]report.JobReport, error) {
 	reports, err := b.Build(ctx)
 	if err != nil {
 		return nil, err
 	}
 	if c.act {
-		if err := actOnZombies(ctx, kc, reports, c.zombieWin); err != nil {
+		if err := actOnZombies(ctx, kc, reports, c.zombieWin, ev); err != nil {
 			return reports, fmt.Errorf("acting on zombies: %w", err)
 		}
 	}
@@ -208,13 +214,54 @@ func printTable(out io.Writer, reports []report.JobReport, c config) {
 	}
 }
 
-// stamped remembers when each job was last Evented, so --watch mode does not
-// re-stamp the same job every cycle.
-var stamped = map[int]time.Time{}
+// eventLog remembers when each job was last Evented, so a job is not
+// re-stamped every cycle.
+//
+// It carries a mutex because --serve and --act compose: in serve mode
+// actOnZombies runs inside an HTTP handler, and net/http runs handlers
+// concurrently. Two overlapping scrapes against a bare map produce
+// "fatal error: concurrent map writes" - an unrecoverable panic that no
+// recover() can catch, which means anyone able to reach /metrics could crash
+// warden on demand.
+type eventLog struct {
+	mu   sync.Mutex
+	seen map[int]time.Time
+}
+
+func newEventLog() *eventLog {
+	return &eventLog{seen: make(map[int]time.Time)}
+}
+
+// claim reports whether this job should be Evented now, and records the
+// attempt if so.
+//
+// Checking and recording happen under one lock on purpose. Splitting them into
+// a separate "should I?" and "I did" would let two concurrent scrapes both
+// pass the check and both emit an Event for the same job - a race that is
+// invisible in single-threaded --watch mode and appears only under --serve.
+//
+// Note this records the attempt before the Event is created, so a failed emit
+// consumes the window rather than retrying immediately. That is the safer
+// direction for something that writes to the cluster: at most one Event per
+// job per window, even when things are going wrong.
+//
+// Its call site is deliberate for the same reason in reverse: the caller
+// claims only after it has resolved the job's pod, so a job skipped over a
+// worker that was merely mid-restart - where no Event was ever attempted - is
+// reconsidered next cycle instead of being silenced for a window.
+func (e *eventLog) claim(jobID int, win time.Duration) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if last, ok := e.seen[jobID]; ok && time.Since(last) < win {
+		return false
+	}
+	e.seen[jobID] = time.Now()
+	return true
+}
 
 // actOnZombies emits one Kubernetes Event per zombie job, on the worker pod
 // holding its first allocated node.
-func actOnZombies(ctx context.Context, kc *kube.Client, reports []report.JobReport, win time.Duration) error {
+func actOnZombies(ctx context.Context, kc *kube.Client, reports []report.JobReport, win time.Duration, ev *eventLog) error {
 	nodes, err := kc.NodeMap(ctx)
 	if err != nil {
 		return fmt.Errorf("resolving pods for events: %w", err)
@@ -222,9 +269,6 @@ func actOnZombies(ctx context.Context, kc *kube.Client, reports []report.JobRepo
 	for _, r := range reports {
 		if !r.Zombie {
 			continue
-		}
-		if last, ok := stamped[r.Job.JobID]; ok && time.Since(last) < win {
-			continue // already warned about this job within the window
 		}
 		slurmNodes, err := slurmapi.ExpandNodes(r.Job.Nodes)
 		if err != nil || len(slurmNodes) == 0 {
@@ -238,11 +282,17 @@ func actOnZombies(ctx context.Context, kc *kube.Client, reports []report.JobRepo
 			fmt.Printf("job %d: no pod for slurm node %q, skipping event\n", r.Job.JobID, slurmNodes[0])
 			continue
 		}
+		// Claimed here, not at the top of the loop: the two skips above are
+		// transient conditions where no Event was ever attempted, and claiming
+		// before them would silence the job for a whole window over a worker
+		// that was merely mid-restart.
+		if !ev.claim(r.Job.JobID, win) {
+			continue // already warned about this job within the window
+		}
 		detail := fmt.Sprintf("peak %.0f%% over %s", r.PeakUtil, win)
 		if err := kc.EmitZombieEvent(ctx, &pod, r.Job.JobID, r.Job.Owner(), detail); err != nil {
 			return err
 		}
-		stamped[r.Job.JobID] = time.Now()
 		fmt.Printf("event emitted on %s for job %d\n", pod.Name, r.Job.JobID)
 	}
 	return nil
