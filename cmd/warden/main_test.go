@@ -3,12 +3,12 @@ package main
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
-	"net/http"
-	"net/http/httptest"
 
 	"github.com/lmsilva/gpu-warden/internal/report"
 )

@@ -2,8 +2,8 @@ package slurmapi
 
 import (
 	"reflect"
-	"testing"
 	"strings"
+	"testing"
 )
 
 func TestGPUCount(t *testing.T) {

@@ -23,10 +23,10 @@ var idxSpec = regexp.MustCompile(`IDX:([0-9,\-]+)`)
 // GPUIndices maps each Slurm node name a job holds to the GPU device indices
 // allocated to that job ON that node.
 //
-// DCGM publishes one series per physical GPU, labelled with the device index; 
-// without this map, a query scoped only by pod name reads EVERY GPU on the node, 
-// so a job sitting idle on GPUs 0-1 inherits the utilization of whatever else is 
-// running on GPUs 2-3. On a single-GPU node the distinction does not exist, 
+// DCGM publishes one series per physical GPU, labelled with the device index;
+// without this map, a query scoped only by pod name reads EVERY GPU on the node,
+// so a job sitting idle on GPUs 0-1 inherits the utilization of whatever else is
+// running on GPUs 2-3. On a single-GPU node the distinction does not exist,
 // which is exactly why the bug survives a single-GPU lab.
 //
 // The source is gres_detail, which Slurm reports as one entry per allocated

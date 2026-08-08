@@ -34,8 +34,8 @@ func NewClient(kubeconfig, namespace, nodeLabel string) (*Client, error) {
 	return &Client{cs: cs, namespace: namespace, nodeLabel: nodeLabel}, nil
 }
 
-// SlurmNodeLabel is the pod label the slurm-operator stamps with a worker's Slurm node name. 
-// GetSlurmNodeName returns pod.Spec.Hostname, and it publishes that same value here. 
+// SlurmNodeLabel is the pod label the slurm-operator stamps with a worker's Slurm node name.
+// GetSlurmNodeName returns pod.Spec.Hostname, and it publishes that same value here.
 // Overridable via --pod-hostname-label for clusters that differ.
 const SlurmNodeLabel = "nodeset.slinky.slurm.net/pod-hostname"
 
