@@ -40,6 +40,10 @@ JOBID  NAME     USER       GPUS  ELAPSED  AVG%  PEAK%  WASTED-GPU-H  VERDICT
 ```
 
 #### Serve Prometheus metrics endpoint
+
+Do note anyone who can reach this port gets the metrics, and they include usernames. Bind it to localhost or a cluster-internal Service.
+Responses are cached for `--serve-cache` (30s by default). Keep it under your Prometheus scrape interval, or you'll scrape the same numbers twice. `--serve-cache 0` turns it off and rebuilds on every scrape.
+
 ```
 lmsilva@TrashPanda:~/gpu-warden$ go run ./cmd/warden --serve :9410 &
 serving /metrics on :9410
@@ -85,3 +89,26 @@ Events:
   ----     ------             ----  ----        -------
   Warning  GPUAllocationIdle  54m   gpu-warden  slurm job 113 (user uid:50000) holds GPUs with no activity: peak 0% over 15m0s
 ```
+
+## Flags
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--slurm-url` | `http://localhost:6820` | slurmrestd base URL |
+| `--slurm-api` | `v0.0.44` | slurmrestd API version |
+| `--prom-url` | `http://localhost:9090` | Prometheus base URL |
+| `--kubeconfig` | `$KUBECONFIG`, else `~/.kube/config` | kubeconfig path |
+| `--namespace` | `slurm` | namespace holding the Slurm worker pods |
+| `--pod-hostname-label` | `nodeset.slinky.slurm.net/pod-hostname` | pod label carrying the Slurm node name |
+| `--pod-label` | `exported_pod` | DCGM metric label carrying the pod name |
+| `--watch` | `0` | refresh interval for top mode (0 = print once) |
+| `--serve` | off | expose `/metrics` on this address instead of printing a table |
+| `--serve-cache` | `30s` | how long a build is reused before `/metrics` rebuilds (0 disables) |
+| `--act` | `false` | emit Kubernetes Events for zombie findings |
+| `--zombie-threshold` | `5` | GPU util % below which a job may be a zombie |
+| `--zombie-window` | `15m` | how long utilization must stay low before judging |
+| `--dollar-rate` | `0` | $/GPU-hour, for costing the waste column |
+
+Environment variables: `SLURM_JWT` for the slurmrestd token, and `WARDEN_SLURM_URL`, `WARDEN_SLURM_API`, `WARDEN_PROM_URL`, `WARDEN_NAMESPACE`, `WARDEN_POD_HOSTNAME_LABEL`, `WARDEN_POD_LABEL` as defaults for the flags above.
+
+In `--serve` mode, warden honours the scrape timeout Prometheus sends and finishes just inside it, so a slow cluster gets an error you can read instead of a dropped connection.
