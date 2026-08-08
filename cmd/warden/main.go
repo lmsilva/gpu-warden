@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync"
 	"syscall"
 	"text/tabwriter"
@@ -24,6 +25,33 @@ import (
 // WriteTimeout must stay comfortably above it, or a slow cluster would be cut
 // off mid-response rather than returning an honest 500.
 const cycleTimeout = 30 * time.Second
+
+// scrapeTimeoutOffset is subtracted from the scrape timeout Prometheus sends,
+// so the build finishes and the response is written before the client gives
+// up. Without it, network latency alone can push the reply past the deadline.
+const scrapeTimeoutOffset = 500 * time.Millisecond
+
+// scrapeBudget returns how long this request's build may take. Prometheus
+// sends the scrape timeout it is using; finishing inside it means returning a
+// readable error rather than having the connection cut. Anything without the
+// header - a curl, a health check - gets cycleTimeout.
+func scrapeBudget(r *http.Request) time.Duration {
+	v := r.Header.Get("X-Prometheus-Scrape-Timeout-Seconds")
+	if v == "" {
+		return cycleTimeout
+	}
+	secs, err := strconv.ParseFloat(v, 64)
+	if err != nil || secs <= 0 {
+		return cycleTimeout
+	}
+	full := time.Duration(secs * float64(time.Second))
+	// A timeout shorter than the offset would leave nothing, or a negative
+	// budget that expires instantly. Use it whole and accept the tight fit.
+	if full <= scrapeTimeoutOffset {
+		return full
+	}
+	return full - scrapeTimeoutOffset
+}
 
 type config struct {
 	slurmURL   string
@@ -114,7 +142,7 @@ func main() {
 			// Derive from the request, not Background: a scrape Prometheus
 			// abandons cancels warden's in-flight calls instead of leaving them
 			// to finish into a closed connection.
-			ctx, cancel := context.WithTimeout(r.Context(), cycleTimeout)
+			ctx, cancel := context.WithTimeout(r.Context(), scrapeBudget(r))
 			defer cancel()
 			reports, err := cache.get(ctx, func(ctx context.Context) ([]report.JobReport, error) {
 				return runCycle(ctx, b, kc, c, ev)
