@@ -54,8 +54,6 @@ type JobReport struct {
 	WastedH float64 // GPU-hours of allocated-but-unused capacity
 	HasData bool    // utilization telemetry actually observed for this job's pods
 
-	Zombie bool
-
 	// PerGPU records whether telemetry was scoped to the exact GPU devices
 	// this job holds. False means the numbers cover every GPU on the job's
 	// nodes, which is only equivalent when the job holds them all.
@@ -92,28 +90,16 @@ type Builder struct {
 	// to set them would get a judge with a 0s idle window, which would flag
 	// everything.
 	Thresholds verdict.Thresholds
-
-	ZombiePct float64
-	ZombieWin time.Duration
 }
 
-// thresholds returns the configured knobs. Precedence is explicit rather than
-// clever: an operator who set Thresholds meant it; a caller still on the old
-// fields gets those folded into a default set; anyone who set neither gets
-// the shipped defaults, because a judge with a 0s idle window flags every job
-// on the cluster.
+// thresholds returns the configured knobs, falling back to the shipped
+// defaults when the Builder was constructed without them - otherwise a caller
+// that forgot would get a judge with a 0s idle window, which flags every job.
 func (b *Builder) thresholds() verdict.Thresholds {
-	if b.Thresholds.IdleWindow != 0 {
-		return b.Thresholds
+	if b.Thresholds.IdleWindow == 0 {
+		return verdict.DefaultThresholds()
 	}
-	th := verdict.DefaultThresholds()
-	if b.ZombieWin != 0 {
-		th.IdleWindow = b.ZombieWin
-	}
-	if b.ZombiePct != 0 {
-		th.IdleUtilPct = b.ZombiePct
-	}
-	return th
+	return b.Thresholds
 }
 
 // podLabel is configuration, not a constant: kube-prometheus-stack renames the
@@ -195,7 +181,6 @@ func (b *Builder) Build(ctx context.Context) ([]JobReport, error) {
 		// Every "is this waste" decision happens in one pure function.
 		// report's job is to measure honestly and hand the numbers over.
 		r.Verdict = verdict.Judge(m, th)
-		r.Zombie = r.IsZombie() // set from the verdict; goes away once nothing reads it
 		out = append(out, r)
 	}
 	return out, nil
