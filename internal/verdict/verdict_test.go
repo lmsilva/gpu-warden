@@ -104,3 +104,86 @@ func TestJudge(t *testing.T) {
 		})
 	}
 }
+
+// TestJudgeEngineConfidence covers the optional engine signals. They must never
+// change WHAT warden finds — only how confident it is and what it says — so
+// every case below asserts the activity verdict is untouched.
+func TestJudgeEngineConfidence(t *testing.T) {
+	th := DefaultThresholds()
+
+	// A busy-looking job. Utilization is pegged; the engine signals decide how
+	// much that reading is worth.
+	busy := Metrics{Elapsed: 3 * time.Hour, HasStart: true,
+		HasUtil: true, AvgUtil: 95, PeakUtil: 100,
+		HasMem: true, PeakMemFrac: 0.60, AvgMemFrac: 0.55}
+
+	// A crash-signature zombie: worked earlier, flat now, not yet past the
+	// 2h duration bar.
+	crashed := Metrics{Elapsed: 50 * time.Minute, HasStart: true,
+		HasUtil: true, AvgUtil: 40, PeakUtil: 2,
+		HasMem: true, PeakMemFrac: 0.50, AvgMemFrac: 0.40}
+
+	with := func(m Metrics, f func(*Metrics)) Metrics { f(&m); return m }
+
+	cases := []struct {
+		name     string
+		m        Metrics
+		activity Activity
+		conf     Confidence
+	}{
+		{
+			name:     "no profiling metrics: trust utilization",
+			m:        busy,
+			activity: Healthy, conf: ConfHigh,
+		},
+		{
+			name: "engine lit and SMs busy: high confidence",
+			m: with(busy, func(m *Metrics) {
+				m.HasGrEngine, m.PeakGrEngine = true, 0.85
+				m.HasSM, m.PeakSM = true, 0.70
+			}),
+			activity: Healthy, conf: ConfHigh,
+		},
+		{
+			name: "engine lit but few SMs active: busy but shallow",
+			m: with(busy, func(m *Metrics) {
+				m.HasGrEngine, m.PeakGrEngine = true, 0.90
+				m.HasSM, m.PeakSM = true, 0.08
+			}),
+			activity: Healthy, conf: ConfMedium,
+		},
+		{
+			name: "engine unlit despite 100% util: uncorroborated, still Healthy",
+			m: with(busy, func(m *Metrics) {
+				m.HasGrEngine, m.PeakGrEngine = true, 0.01
+				m.HasSM, m.PeakSM = true, 0.01
+			}),
+			activity: Healthy, conf: ConfLow,
+		},
+		{
+			name:     "crash signature alone is medium confidence",
+			m:        crashed,
+			activity: Zombie, conf: ConfMedium,
+		},
+		{
+			name: "crash signature corroborated by a flat engine is high",
+			m: with(crashed, func(m *Metrics) {
+				m.HasGrEngine, m.PeakGrEngine = true, 0.00
+			}),
+			activity: Zombie, conf: ConfHigh,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			v := Judge(tc.m, th)
+			if v.Activity != tc.activity {
+				t.Errorf("activity: got %s, want %s (enrichment must not change the finding)", v.Activity, tc.activity)
+			}
+			if v.Confidence != tc.conf {
+				t.Errorf("confidence: got %s, want %s", v.Confidence, tc.conf)
+			}
+			t.Logf("%-52s -> %-22s :: %s", tc.name, v.Summary(), v.Reasons[len(v.Reasons)-1])
+		})
+	}
+}

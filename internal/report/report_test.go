@@ -43,7 +43,13 @@ type gpu struct {
 // node shared by two jobs and a query that asks the wrong question. Keys are
 // "pod/gpu". Queries are answered by aggregating only the devices their
 // selectors actually name, which is what a real Prometheus does with "or".
-type fakeProm struct{ byGPU map[string]gpu }
+type fakeProm struct {
+	byGPU map[string]gpu
+	// engine holds GR_ENGINE_ACTIVE per device. Nil means the cluster does
+	// not scrape it at all, which is the common case and what most of these
+	// tests model.
+	engine map[string]float64
+}
 
 var selRe = regexp.MustCompile(`exported_pod=~"\^\(([^)]*)\)\$"(?:,gpu=~"\^\(([^)]*)\)\$")?`)
 
@@ -52,6 +58,16 @@ var selRe = regexp.MustCompile(`exported_pod=~"\^\(([^)]*)\)\$"(?:,gpu=~"\^\(([^
 func (f fakeProm) devices(q string) []string {
 	seen := map[string]bool{}
 	var out []string
+	// A query with no selector at all is fleet-wide. The instrument-fault
+	// guard asks two of those, and they must see every device or the guard
+	// can never fire.
+	if !selRe.MatchString(q) {
+		for key := range f.byGPU {
+			out = append(out, key)
+		}
+		slices.Sort(out)
+		return out
+	}
 	for _, m := range selRe.FindAllStringSubmatch(q, -1) {
 		pod, idx := m[1], m[2]
 		for key := range f.byGPU {
@@ -75,16 +91,19 @@ func (f fakeProm) Query(ctx context.Context, q string) ([]promapi.Sample, error)
 	if len(keys) == 0 {
 		return nil, nil
 	}
-	// Pick the value each selected device contributes. Order matters: the
-	// capacity query names FB_USED and FB_FREE, so it must be matched first.
-	var value func(gpu) float64
+	// Pick the value each selected device contributes. Keyed by device rather
+	// than by gpu struct, because the engine reading lives in its own map.
+	// Order matters: the capacity query names FB_USED and FB_FREE, so it must
+	// be matched first.
+	var value func(key string) float64
 	switch {
 	case strings.Contains(q, "FB_FREE"):
-		value = func(g gpu) float64 { return g.fbUsed + g.fbFree }
+		value = func(k string) float64 { return f.byGPU[k].fbUsed + f.byGPU[k].fbFree }
 	case strings.Contains(q, "FB_USED"):
-		value = func(g gpu) float64 { return g.fbUsed }
+		value = func(k string) float64 { return f.byGPU[k].fbUsed }
 	case strings.Contains(q, "GPU_UTIL"):
-		value = func(g gpu) float64 {
+		value = func(k string) float64 {
+			g := f.byGPU[k]
 			if !strings.HasPrefix(q, "max(") {
 				return g.util
 			}
@@ -93,15 +112,21 @@ func (f fakeProm) Query(ctx context.Context, q string) ([]promapi.Sample, error)
 			}
 			return g.peakUtil
 		}
+	case strings.Contains(q, "GR_ENGINE_ACTIVE"):
+		if f.engine == nil {
+			return nil, nil // this cluster does not scrape it
+		}
+		value = func(k string) float64 { return f.engine[k] }
 	default:
-		// Profiling metrics are not scraped in this fake: an empty vector,
-		// exactly like a real Prometheus that has never seen the series.
+		// The other profiling metrics are not scraped in this fake: an empty
+		// vector, exactly like a real Prometheus that has never seen the
+		// series.
 		return nil, nil
 	}
 
 	vals := make([]float64, 0, len(keys))
 	for _, k := range keys {
-		vals = append(vals, value(f.byGPU[k]))
+		vals = append(vals, value(k))
 	}
 	out := vals[0]
 	if strings.HasPrefix(q, "max(") {
@@ -228,6 +253,83 @@ func TestBuild(t *testing.T) {
 	if idle.PeakMemMiB != 1*GiB {
 		t.Errorf("idle sharer peak memory %.0f MiB - memory is leaking too", idle.PeakMemMiB)
 	}
+}
+
+// engineJob is the one-job fixture the two guard tests share: a single GPU on
+// one node, running long enough to be past warmup.
+func engineJob() (fakeJobs, fakeNodes) {
+	start := time.Now().Add(-3 * time.Hour).Unix()
+	return fakeJobs{jobs: []slurmapi.Job{
+			{JobID: 1, Name: "busy", UserName: "luis", State: []string{"RUNNING"},
+				Nodes: "w-0", TresAlloc: "cpu=4,gres/gpu=1",
+				GresDetail: []string{"gpu:1(IDX:0)"},
+				StartTime:  slurmapi.NoVal{Set: true, Number: start}},
+		}},
+		fakeNodes{"w-0": "pod-w-0"}
+}
+
+// TestEngineFaultGuard: the engine reads flat while a GPU is demonstrably
+// busy, so the instrument is faulted rather than the fleet being idle. The
+// signal is dropped for the cycle, the report says so, and the verdict is
+// judged on utilization alone - NOT downgraded on a reading we do not believe.
+func TestEngineFaultGuard(t *testing.T) {
+	const GiB = 1024.0
+	jobs, nodes := engineJob()
+	prom := fakeProm{
+		byGPU:  map[string]gpu{"pod-w-0/0": {util: 97, fbUsed: 10 * GiB, fbFree: 5 * GiB}},
+		engine: map[string]float64{"pod-w-0/0": 0}, // scraped, and flat
+	}
+	b := &Builder{Jobs: jobs, Prom: prom, Nodes: nodes, PodLabel: "exported_pod",
+		Thresholds: verdict.DefaultThresholds()}
+	got, err := b.Build(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want 1 report, got %d", len(got))
+	}
+	r := got[0]
+	if !r.EngineFaulted {
+		t.Errorf("engine flat everywhere while a GPU reads 97%% is a faulted sensor, not an idle fleet")
+	}
+	if r.Verdict.Activity != verdict.Healthy {
+		t.Errorf("a busy job stays healthy whatever the engine says: %s", r.Verdict.Summary())
+	}
+	// The point of the guard: a signal we have decided not to believe must not
+	// be allowed to lower confidence either.
+	if r.Verdict.Confidence != verdict.ConfHigh {
+		t.Errorf("dropped signal must not downgrade the verdict, got %s", r.Verdict.Confidence)
+	}
+	t.Logf("%s :: %s", r.Verdict.Summary(), r.Verdict.Reason())
+}
+
+// TestEngineUnlitIsBelieved is the other half. Same flat engine reading, but
+// nothing on the fleet is working hard, so there is no contradiction and no
+// reason to distrust the sensor. The signal is used, and it drops confidence.
+func TestEngineUnlitIsBelieved(t *testing.T) {
+	const GiB = 1024.0
+	jobs, nodes := engineJob()
+	prom := fakeProm{
+		byGPU:  map[string]gpu{"pod-w-0/0": {util: 40, fbUsed: 10 * GiB, fbFree: 5 * GiB}},
+		engine: map[string]float64{"pod-w-0/0": 0.02},
+	}
+	b := &Builder{Jobs: jobs, Prom: prom, Nodes: nodes, PodLabel: "exported_pod",
+		Thresholds: verdict.DefaultThresholds()}
+	got, err := b.Build(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	r := got[0]
+	if r.EngineFaulted {
+		t.Errorf("no GPU is busy, so a quiet engine is not evidence of a broken sensor")
+	}
+	if r.Verdict.Activity != verdict.Healthy {
+		t.Errorf("an optional signal must never change the finding: %s", r.Verdict.Summary())
+	}
+	if r.Verdict.Confidence != verdict.ConfLow {
+		t.Errorf("an uncorroborated utilization reading is low confidence, got %s", r.Verdict.Confidence)
+	}
+	t.Logf("%s :: %s", r.Verdict.Summary(), r.Verdict.Reason())
 }
 
 // TestTargetsFallback proves the degradation path: with no gres_detail, the
