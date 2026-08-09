@@ -106,7 +106,7 @@ squeue -o '%.8i %.10j %.8T %.10M %.10R %b'
 ### Running GPU Squire
 #### Basic Usage
 ```
-lmsilva@PANDAMONIUM:~/squire$ go run ./cmd/Squire
+lmsilva@PANDAMONIUM:~/squire$ go run ./cmd/squire
 JOBID  NAME     USER       GPUS  ELAPSED  AVG%  PEAK%  GPU-MEM        WASTED-GPU-H  ACTIVITY        SIZING
 129    tinygpt  uid:50000  1     1m0s     100   100    2.9/15G (20%)  0.0           healthy:medium  right-sized
 130    zombie   uid:50000  1     1m0s     0     0      0.0/15G (0%)   0.0           analyzing       -
@@ -115,7 +115,7 @@ lmsilva@PANDAMONIUM:~/squire$
 
 #### Show the evidence
 ```
-lmsilva@PANDAMONIUM:~/squire$ go run ./cmd/Squire --wide
+lmsilva@PANDAMONIUM:~/squire$ go run ./cmd/squire --wide
 JOBID  NAME     USER       GPUS  ELAPSED  AVG%  PEAK%  GPU-MEM        WASTED-GPU-H  ACTIVITY        SIZING       WHY
 129    tinygpt  uid:50000  1     2m0s     100   100    2.9/15G (20%)  0.0           healthy:medium  right-sized  GPU util peak 100% over 30m0s; tensor cores near idle (0%) - util may not mean training throughput
 130    zombie   uid:50000  1     2m0s     0     0      0.0/15G (0%)   0.0           analyzing       -            warming up (2m0s of 15m0s, no real burst yet)
@@ -124,7 +124,7 @@ lmsilva@PANDAMONIUM:~/squire$
 
 #### Watch it and estimate wasted dollar amount
 ```
-lmsilva@PANDAMONIUM:~/squire$ go run ./cmd/Squire --watch 30s --dollar-rate 0.53 -wide
+lmsilva@PANDAMONIUM:~/squire$ go run ./cmd/squire --watch 30s --dollar-rate 0.53 -wide
 
 === 10:26:09 ===
 JOBID  NAME     USER       GPUS  ELAPSED  AVG%  PEAK%  GPU-MEM        WASTED-GPU-H  ACTIVITY        SIZING       WHY
@@ -138,7 +138,7 @@ Do note anyone who can reach this port gets the metrics, and they include userna
 Responses are cached for `--serve-cache` (30s by default). Keep it under your Prometheus scrape interval, or you'll scrape the same numbers twice. `--serve-cache 0` turns it off and rebuilds on every scrape.
 
 ```
-lmsilva@TrashPanda:~/squire$ go run ./cmd/Squire --serve :9410 & 
+lmsilva@PANDAMONIUM:~/squire$ go run ./cmd/squire --serve :9410 & 
 serving /metrics on :9410 
 lmsilva@PANDAMONIUM:~/squire$ curl -s http://localhost:9410/metrics | grep -E 'squire_job_(activity|sizing)'
 # HELP squire_job_activity Job activity verdict: 1 on the state currently held (analyzing, healthy, idle, zombie).
@@ -166,7 +166,7 @@ lmsilva@PANDAMONIUM:~/squire$
 
 #### Act on the findings by stamping the POD!
 ```
-lmsilva@PANDAMONIUM:~/squire$ go run ./cmd/Squire --watch 30s --dollar-rate 0.53 --grace 1m --zombie-after 1m --act
+lmsilva@PANDAMONIUM:~/squire$ go run ./cmd/squire --watch 30s --dollar-rate 0.53 --grace 1m --zombie-after 1m --act
 event emitted on slurm-worker-gpu-1 for job 130
 
 === 10:27:55 ===
