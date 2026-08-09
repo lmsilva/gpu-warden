@@ -107,8 +107,9 @@ func (c Confidence) String() string {
 // are not an operator's dial. Anything that can change a finding belongs in
 // Thresholds where it can be overridden and, later, recorded.
 const (
-	shallowSMFrac  = 0.20 // SM activity below this means busy but shallow
-	idleTensorFrac = 0.05 // tensor activity below this means no tensor work
+	unlitEngineFrac = 0.05 // engine activity below this contradicts a high util reading
+	shallowSMFrac   = 0.20 // SM activity below this means busy but shallow
+	idleTensorFrac  = 0.05 // tensor activity below this means no tensor work
 )
 
 // Metrics is everything the judge needs about one job, already aggregated
@@ -142,12 +143,14 @@ type Metrics struct {
 	// needs DCGM profiling metrics, which plenty of clusters do not scrape,
 	// so a verdict that depended on them would mean different things on
 	// different clusters for reasons invisible in the output.
-	HasSM      bool
-	PeakSM     float64 // fraction of SMs active, peak over the idle window (0-1)
-	HasTensor  bool
-	PeakTensor float64 // tensor pipe active, peak over the idle window (0-1)
-	HasPower   bool
-	PeakPowerW float64 // peak power draw over the idle window (watts)
+	HasGrEngine  bool
+	PeakGrEngine float64 // compute engine active, peak over the idle window (0-1)
+	HasSM        bool
+	PeakSM       float64 // fraction of SMs active, peak over the idle window (0-1)
+	HasTensor    bool
+	PeakTensor   float64 // tensor pipe active, peak over the idle window (0-1)
+	HasPower     bool
+	PeakPowerW   float64 // peak power draw over the idle window (watts)
 }
 
 // Thresholds are the tunable knobs. An operator overrides them globally for
@@ -292,9 +295,17 @@ func activityConfidence(v *Verdict, m Metrics, th Thresholds) Confidence {
 	switch v.Activity {
 	case Healthy:
 		// Utilization is an occupancy flag: one small kernel running the
-		// whole sample window reads as 100%. If the deeper signals are
-		// available and low, the card is busy but shallow. If they are fine,
-		// or simply not scraped, trust the reading.
+		// whole sample window reads as 100%. The deeper signals are read
+		// broadest-first. If they look fine, or are simply not scraped,
+		// trust the reading.
+		if m.HasGrEngine && m.PeakGrEngine < unlitEngineFrac {
+			// The engine was barely busy, so the utilization reading is
+			// uncorroborated. Still healthy - an optional metric does not
+			// convict - but said quietly.
+			v.Reasons = append(v.Reasons, fmt.Sprintf("but compute engine active only %.0f%% - utilization not corroborated",
+				m.PeakGrEngine*100))
+			return ConfLow
+		}
 		if m.HasSM && m.PeakSM < shallowSMFrac {
 			v.Reasons = append(v.Reasons, fmt.Sprintf("but SM activity only %.0f%% - busy but shallow (check data loading)",
 				m.PeakSM*100))
@@ -307,9 +318,15 @@ func activityConfidence(v *Verdict, m Metrics, th Thresholds) Confidence {
 		}
 		return ConfHigh
 	case Zombie:
-		// A long-idle zombie is measured. A crash-signature zombie, which has
-		// not yet passed the duration bar, is inferred - strong, not certain.
+		// A long-idle zombie is measured. A crash-signature zombie is
+		// inferred - strong, not certain - unless a second, independent
+		// signal agrees the engine is flat, which is corroboration.
 		if m.Elapsed >= th.ZombieAfter {
+			return ConfHigh
+		}
+		if m.HasGrEngine && m.PeakGrEngine < unlitEngineFrac {
+			v.Reasons = append(v.Reasons, fmt.Sprintf("compute engine also flat (%.0f%%) - corroborates the idle reading",
+				m.PeakGrEngine*100))
 			return ConfHigh
 		}
 		return ConfMedium
