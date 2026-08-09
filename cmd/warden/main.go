@@ -19,6 +19,7 @@ import (
 	"github.com/lmsilva/gpu-warden/internal/promapi"
 	"github.com/lmsilva/gpu-warden/internal/report"
 	"github.com/lmsilva/gpu-warden/internal/slurmapi"
+	"github.com/lmsilva/gpu-warden/internal/verdict"
 )
 
 // cycleTimeout bounds one build of the reports, in either mode. The server's
@@ -64,9 +65,13 @@ type config struct {
 	serveCache time.Duration
 	watch      time.Duration
 	act        bool
-	zombiePct  float64
-	zombieWin  time.Duration
 	dollarRate float64
+	wide       bool
+
+	// th holds the verdict thresholds. They are a single struct rather than
+	// loose fields so the whole opinion travels together into the Builder and,
+	// later, into a stored verdict row.
+	th verdict.Thresholds
 
 	podHostLabel   string // POD label carrying the Slurm node name
 	podMetricLabel string // DCGM SERIES label carrying the pod name
@@ -81,6 +86,10 @@ func envOr(key, def string) string {
 
 func parseConfig() config {
 	var c config
+	// Defaults come from the verdict package, so the flag help text and the
+	// compiled-in opinion can never drift apart.
+	def := verdict.DefaultThresholds()
+
 	flag.StringVar(&c.slurmURL, "slurm-url", envOr("WARDEN_SLURM_URL", "http://localhost:6820"), "slurmrestd base URL")
 	flag.StringVar(&c.slurmVer, "slurm-api", envOr("WARDEN_SLURM_API", "v0.0.44"), "slurmrestd API version")
 	flag.StringVar(&c.promURL, "prom-url", envOr("WARDEN_PROM_URL", "http://localhost:9090"), "Prometheus base URL")
@@ -94,10 +103,27 @@ func parseConfig() config {
 	flag.DurationVar(&c.serveCache, "serve-cache", 30*time.Second, "minimum age of a cached build before /metrics rebuilds (0 disables)")
 	flag.DurationVar(&c.watch, "watch", 0, "refresh interval for top mode (0 = print once)")
 	flag.BoolVar(&c.act, "act", false, "emit Kubernetes Events for zombie findings")
-	flag.Float64Var(&c.zombiePct, "zombie-threshold", 5, "GPU util % below which a job may be a zombie")
-	flag.DurationVar(&c.zombieWin, "zombie-window", 15*time.Minute, "sustained window for zombie judgment")
 	flag.Float64Var(&c.dollarRate, "dollar-rate", 0, "optional $/GPU-hour for waste costing")
+	flag.BoolVar(&c.wide, "wide", false, "show the evidence behind each verdict")
+
+	// Threshold overrides. These are GLOBAL, per warden instance — there is
+	// deliberately no per-job knob, so nobody can tune away an inconvenient
+	// verdict on their own job.
+	flag.DurationVar(&c.th.GraceCeiling, "grace", def.GraceCeiling, "warmup ceiling before a job can be judged")
+	flag.Float64Var(&c.th.BurstUtilPct, "burst-util", def.BurstUtilPct, "GPU util % counting as real work, ending warmup early")
+	flag.DurationVar(&c.th.IdleWindow, "idle-window", def.IdleWindow, "trailing window peak utilization is measured over")
+	flag.Float64Var(&c.th.IdleUtilPct, "idle-util", def.IdleUtilPct, "peak GPU util % below which the job is idle")
+	flag.DurationVar(&c.th.ZombieAfter, "zombie-after", def.ZombieAfter, "how long idle must persist before it is a zombie")
+	flag.Float64Var(&c.th.WorkedAvgPct, "worked-util", def.WorkedAvgPct, "avg GPU util % proving the job did real work earlier")
+	flag.Float64Var(&c.th.MemFloorFrac, "mem-floor", def.MemFloorFrac, "peak memory fraction below which a job is over-provisioned")
 	flag.Parse()
+
+	// The remaining three knobs stay compiled-in: they only ever move together
+	// with the ones above, and every extra flag is a way to misconfigure
+	// warden.
+	c.th.BurstMemFrac = def.BurstMemFrac
+	c.th.UnderUtilPct = def.UnderUtilPct
+	c.th.UnderMemFrac = def.UnderMemFrac
 
 	// Slurm Rest API's JWT Token
 	c.slurmToken = os.Getenv("SLURM_JWT")
@@ -116,12 +142,11 @@ func main() {
 	}
 
 	b := &report.Builder{
-		Jobs:      sc,
-		Prom:      pc,
-		Nodes:     kc,
-		PodLabel:  c.podMetricLabel,
-		ZombiePct: c.zombiePct,
-		ZombieWin: c.zombieWin,
+		Jobs:       sc,
+		Prom:       pc,
+		Nodes:      kc,
+		PodLabel:   c.podMetricLabel,
+		Thresholds: c.th,
 	}
 
 	// One event log for the process lifetime, shared by every cycle.
@@ -132,6 +157,9 @@ func main() {
 		if c.watch > 0 {
 			fmt.Println("note: --watch is ignored with --serve; Prometheus sets the cadence")
 		}
+		// The cache matters more than it used to: a build is now EIGHT
+		// Prometheus queries per GPU job rather than two, so an uncached
+		// endpoint would be four times the amplifier it was.
 		cache := newCycleCache(c.serveCache)
 
 		// A private mux, not http.DefaultServeMux. The default mux is process
@@ -275,25 +303,40 @@ func runCycle(ctx context.Context, b *report.Builder, kc *kube.Client, c config,
 		return nil, err
 	}
 	if c.act {
-		if err := actOnZombies(ctx, kc, reports, c.zombieWin, ev); err != nil {
+		if err := actOnZombies(ctx, kc, reports, c.th.IdleWindow, ev); err != nil {
 			return reports, fmt.Errorf("acting on zombies: %w", err)
 		}
 	}
 	return reports, nil
 }
 
-// printTable renders reports as a top-style table.
+// printTable renders reports as a top-style table: one column per verdict axis,
+// and (with --wide) the evidence behind them.
 func printTable(out io.Writer, reports []report.JobReport, c config) {
 	// tabwriter buffers: nothing prints until Flush.
 	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 	anyPodWide := false
-	fmt.Fprintln(w, "JOBID\tNAME\tUSER\tGPUS\tELAPSED\tAVG%\tPEAK%\tWASTED-GPU-H\tVERDICT")
+	header := "JOBID\tNAME\tUSER\tGPUS\tELAPSED\tAVG%\tPEAK%\tGPU-MEM\tWASTED-GPU-H\tACTIVITY\tSIZING"
+	if c.wide {
+		header += "\tWHY"
+	}
+	fmt.Fprintln(w, header)
 	for _, r := range reports {
-		verdict := "ok"
-		if !r.HasData {
-			verdict = "no-data"
-		} else if r.Zombie {
-			verdict = "ZOMBIE"
+		v := r.Verdict
+		// Activity carries its confidence inline ("zombie:high"); a verdict
+		// without one (analyzing) prints bare.
+		activity := v.Activity.String()
+		if v.Confidence != verdict.ConfNone {
+			activity += ":" + v.Confidence.String()
+		}
+		sizing := "-"
+		if v.Sizing != verdict.SizingUnknown {
+			sizing = v.Sizing.String()
+		}
+		mem := "-"
+		if r.CapacityMiB > 0 {
+			mem = fmt.Sprintf("%.1f/%.0fG (%.0f%%)",
+				r.PeakMemMiB/1024, r.CapacityMiB/1024, r.PeakMemFrac*100)
 		}
 		cost := fmt.Sprintf("%.1f", r.WastedH)
 		if c.dollarRate > 0 {
@@ -302,20 +345,33 @@ func printTable(out io.Writer, reports []report.JobReport, c config) {
 		// A job whose telemetry could not be scoped to its own GPU devices is
 		// marked, because on a shared node those numbers include a
 		// neighbour's work. Silently printing them as if they were the job's
-		// own is the failure this column exists to prevent!
+		// own is the failure this column exists to prevent.
 		gpus := fmt.Sprintf("%d", r.GPUs)
 		if !r.PerGPU {
 			gpus += "*"
 			anyPodWide = true
 		}
-		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%.0f\t%.0f\t%s\t%s\n",
+		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%.0f\t%.0f\t%s\t%s\t%s\t%s",
 			r.Job.JobID, r.Job.Name, r.Job.Owner(), gpus,
-			r.Elapsed.Round(time.Minute), r.AvgUtil, r.PeakUtil, cost, verdict)
+			r.Elapsed.Round(time.Minute), r.AvgUtil, r.PeakUtil, mem, cost,
+			activity, sizing)
+		if c.wide {
+			fmt.Fprintf(w, "\t%s", truncate(v.Reason(), 64))
+		}
+		fmt.Fprintln(w)
 	}
 	w.Flush()
 	if anyPodWide {
 		fmt.Fprintln(out, "\n* GPU indices unavailable (no gres_detail): telemetry covers every GPU on the job's nodes.")
 	}
+}
+
+// truncate keeps one reason on one terminal line.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n-1] + "…"
 }
 
 // eventLog remembers when each job was last Evented, so a job is not
@@ -355,7 +411,7 @@ func actOnZombies(ctx context.Context, kc *kube.Client, reports []report.JobRepo
 		return fmt.Errorf("resolving pods for events: %w", err)
 	}
 	for _, r := range reports {
-		if !r.Zombie {
+		if !r.IsZombie() {
 			continue
 		}
 		slurmNodes, err := slurmapi.ExpandNodes(r.Job.Nodes)
@@ -372,11 +428,14 @@ func actOnZombies(ctx context.Context, kc *kube.Client, reports []report.JobRepo
 		}
 		// Claimed after the pod is resolved, not at the top of the loop: the
 		// skips above are transient, and claiming first would silence the job
-		// for a window without ever having tried.
+		// for a whole window without ever having tried.
 		if !ev.claim(r.Job.JobID, win) {
 			continue // already warned about this job within the window
 		}
-		detail := fmt.Sprintf("peak %.0f%% over %s", r.PeakUtil, win)
+		// The Event now carries the verdict's own words: its confidence and the
+		// evidence line. Someone reading `kubectl describe pod` gets the
+		// reasoning, not just an accusation.
+		detail := fmt.Sprintf("confidence %s: %s", r.Verdict.Confidence, r.Verdict.Reason())
 		if err := kc.EmitZombieEvent(ctx, &pod, r.Job.JobID, r.Job.Owner(), detail); err != nil {
 			return err
 		}
