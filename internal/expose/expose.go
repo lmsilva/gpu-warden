@@ -37,20 +37,27 @@ func bit(b bool) int {
 	return 0
 }
 
+// ids renders the identity labels that every series carries. One helper rather
+// than the same three labels written out per series: they have to match exactly
+// or PromQL cannot join two of these together, and written out eight times they
+// drift.
+func ids(r report.JobReport) string {
+	return fmt.Sprintf(`job_id="%d",user="%s",partition="%s"`,
+		r.Job.JobID, esc(r.Job.Owner()), esc(r.Job.Partition))
+}
+
 // Write renders one scrape's worth of warden metrics.
 func Write(w io.Writer, reports []report.JobReport) {
 	fmt.Fprintln(w, "# HELP warden_job_gpu_utilization_percent Average GPU utilization per running job.")
 	fmt.Fprintln(w, "# TYPE warden_job_gpu_utilization_percent gauge")
 	for _, r := range reports {
-		fmt.Fprintf(w, "warden_job_gpu_utilization_percent{job_id=\"%d\",user=\"%s\",partition=\"%s\"} %.2f\n",
-			r.Job.JobID, esc(r.Job.Owner()), esc(r.Job.Partition), r.AvgUtil)
+		fmt.Fprintf(w, "warden_job_gpu_utilization_percent{%s} %.2f\n", ids(r), r.AvgUtil)
 	}
 
 	fmt.Fprintln(w, "# HELP warden_job_gpu_hours_wasted Allocated-but-unused GPU-hours per running job.")
 	fmt.Fprintln(w, "# TYPE warden_job_gpu_hours_wasted gauge")
 	for _, r := range reports {
-		fmt.Fprintf(w, "warden_job_gpu_hours_wasted{job_id=\"%d\",user=\"%s\"} %.2f\n",
-			r.Job.JobID, esc(r.Job.Owner()), r.WastedH)
+		fmt.Fprintf(w, "warden_job_gpu_hours_wasted{%s} %.2f\n", ids(r), r.WastedH)
 	}
 
 	// Axis A. One series per state per job; exactly one carries a 1.
@@ -58,8 +65,8 @@ func Write(w io.Writer, reports []report.JobReport) {
 	fmt.Fprintln(w, "# TYPE warden_job_activity gauge")
 	for _, r := range reports {
 		for _, a := range activities {
-			fmt.Fprintf(w, "warden_job_activity{job_id=\"%d\",user=\"%s\",state=\"%s\"} %d\n",
-				r.Job.JobID, esc(r.Job.Owner()), a, bit(r.Verdict.Activity == a))
+			fmt.Fprintf(w, "warden_job_activity{%s,state=\"%s\"} %d\n",
+				ids(r), a, bit(r.Verdict.Activity == a))
 		}
 	}
 
@@ -70,8 +77,8 @@ func Write(w io.Writer, reports []report.JobReport) {
 	fmt.Fprintln(w, "# TYPE warden_job_sizing gauge")
 	for _, r := range reports {
 		for _, s := range sizings {
-			fmt.Fprintf(w, "warden_job_sizing{job_id=\"%d\",user=\"%s\",state=\"%s\"} %d\n",
-				r.Job.JobID, esc(r.Job.Owner()), s.Code(), bit(r.Verdict.Sizing == s))
+			fmt.Fprintf(w, "warden_job_sizing{%s,state=\"%s\"} %d\n",
+				ids(r), s.Code(), bit(r.Verdict.Sizing == s))
 		}
 	}
 
@@ -81,8 +88,8 @@ func Write(w io.Writer, reports []report.JobReport) {
 	fmt.Fprintln(w, "# HELP warden_job_verdict_confidence Confidence in the activity verdict: 0 none, 1 low, 2 medium, 3 high.")
 	fmt.Fprintln(w, "# TYPE warden_job_verdict_confidence gauge")
 	for _, r := range reports {
-		fmt.Fprintf(w, "warden_job_verdict_confidence{job_id=\"%d\",user=\"%s\"} %d\n",
-			r.Job.JobID, esc(r.Job.Owner()), int(r.Verdict.Confidence))
+		fmt.Fprintf(w, "warden_job_verdict_confidence{%s} %d\n",
+			ids(r), int(r.Verdict.Confidence))
 	}
 
 	// Memory, in bytes, per Prometheus base-unit convention. Emitting peak and
@@ -91,14 +98,12 @@ func Write(w io.Writer, reports []report.JobReport) {
 	fmt.Fprintln(w, "# HELP warden_job_gpu_memory_peak_bytes Peak framebuffer memory used on a single GPU of the job.")
 	fmt.Fprintln(w, "# TYPE warden_job_gpu_memory_peak_bytes gauge")
 	for _, r := range reports {
-		fmt.Fprintf(w, "warden_job_gpu_memory_peak_bytes{job_id=\"%d\",user=\"%s\"} %.0f\n",
-			r.Job.JobID, esc(r.Job.Owner()), r.PeakMemMiB*mib)
+		fmt.Fprintf(w, "warden_job_gpu_memory_peak_bytes{%s} %.0f\n", ids(r), r.PeakMemMiB*mib)
 	}
 	fmt.Fprintln(w, "# HELP warden_job_gpu_memory_capacity_bytes Total framebuffer memory of the GPU the job holds.")
 	fmt.Fprintln(w, "# TYPE warden_job_gpu_memory_capacity_bytes gauge")
 	for _, r := range reports {
-		fmt.Fprintf(w, "warden_job_gpu_memory_capacity_bytes{job_id=\"%d\",user=\"%s\"} %.0f\n",
-			r.Job.JobID, esc(r.Job.Owner()), r.CapacityMiB*mib)
+		fmt.Fprintf(w, "warden_job_gpu_memory_capacity_bytes{%s} %.0f\n", ids(r), r.CapacityMiB*mib)
 	}
 
 	// Kept for compatibility with anything already alerting on it. It is now
@@ -107,7 +112,6 @@ func Write(w io.Writer, reports []report.JobReport) {
 	fmt.Fprintln(w, "# HELP warden_job_zombie 1 if the job is judged a zombie allocation.")
 	fmt.Fprintln(w, "# TYPE warden_job_zombie gauge")
 	for _, r := range reports {
-		fmt.Fprintf(w, "warden_job_zombie{job_id=\"%d\",user=\"%s\"} %d\n",
-			r.Job.JobID, esc(r.Job.Owner()), bit(r.IsZombie()))
+		fmt.Fprintf(w, "warden_job_zombie{%s} %d\n", ids(r), bit(r.IsZombie()))
 	}
 }
