@@ -310,6 +310,7 @@ func printTable(out io.Writer, reports []report.JobReport, c config) {
 	// tabwriter buffers: nothing prints until Flush.
 	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 	anyPodWide := false
+	engineFaulted := false
 	header := "JOBID\tNAME\tUSER\tGPUS\tELAPSED\tAVG%\tPEAK%\tGPU-MEM\tWASTED-GPU-H\tACTIVITY\tSIZING"
 	if c.wide {
 		header += "\tWHY"
@@ -345,6 +346,9 @@ func printTable(out io.Writer, reports []report.JobReport, c config) {
 			gpus += "*"
 			anyPodWide = true
 		}
+		if r.EngineFaulted {
+			engineFaulted = true
+		}
 		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%.0f\t%.0f\t%s\t%s\t%s\t%s",
 			r.Job.JobID, r.Job.Name, r.Job.Owner(), gpus,
 			r.Elapsed.Round(time.Minute), r.AvgUtil, r.PeakUtil, mem, cost,
@@ -361,6 +365,10 @@ func printTable(out io.Writer, reports []report.JobReport, c config) {
 	w.Flush()
 	if anyPodWide {
 		fmt.Fprintln(out, "\n* GPU indices unavailable (no gres_detail): telemetry covers every GPU on the job's nodes.")
+	}
+	if engineFaulted {
+		fmt.Fprintln(out, "\nnote: the GR_ENGINE_ACTIVE signal read flat cluster-wide while GPUs were busy,")
+		fmt.Fprintln(out, "so it was ignored this cycle. Verdicts stand; confidence is lower than it could be.")
 	}
 }
 

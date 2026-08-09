@@ -22,9 +22,18 @@ const (
 	metricUtil   = "DCGM_FI_DEV_GPU_UTIL"            // percent, 0-100
 	metricFBUsed = "DCGM_FI_DEV_FB_USED"             // framebuffer used, MiB
 	metricFBFree = "DCGM_FI_DEV_FB_FREE"             // framebuffer free, MiB
+	metricGrEng  = "DCGM_FI_PROF_GR_ENGINE_ACTIVE"   // engine active, 0-1
 	metricSM     = "DCGM_FI_PROF_SM_ACTIVE"          // fraction of SMs active, 0-1
 	metricTensor = "DCGM_FI_PROF_PIPE_TENSOR_ACTIVE" // tensor pipe active, 0-1
 	metricPower  = "DCGM_FI_DEV_POWER_USAGE"         // watts
+)
+
+// Bars for the instrument-fault guard. Engine this flat on every device in the
+// cluster, while some device somewhere is this busy, is a broken sensor rather
+// than an idle fleet.
+const (
+	faultEngineFrac = 0.05
+	faultUtilPct    = 50
 )
 
 // Consumer-defined interfaces: report asks only for what it needs.
@@ -53,6 +62,11 @@ type JobReport struct {
 
 	WastedH float64 // GPU-hours of allocated-but-unused capacity
 	HasData bool    // utilization telemetry actually observed for this job's pods
+
+	// EngineFaulted records that the engine signal was dropped cluster-wide
+	// this cycle because it looked broken. Set on every report in the cycle,
+	// since the judgement is fleet-level.
+	EngineFaulted bool
 
 	// PerGPU records whether telemetry was scoped to the exact GPU devices
 	// this job holds. False means the numbers cover every GPU on the job's
@@ -129,6 +143,11 @@ func (b *Builder) Build(ctx context.Context) ([]JobReport, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolving node-to-pod mapping: %w", err)
 	}
+	// One fleet-level check per cycle, before any job is judged.
+	faulted, err := b.engineFaulted(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("checking engine signal health: %w", err)
+	}
 	var out []JobReport
 	for _, j := range jobs {
 		gpus := slurmapi.GPUCount(j)
@@ -162,7 +181,7 @@ func (b *Builder) Build(ctx context.Context) ([]JobReport, error) {
 		idx := slurmapi.GPUIndices(j)
 		targets := b.targets(nodes, nodeToPod, idx)
 
-		m, err := b.collect(ctx, targets, elapsed, hasStart, th)
+		m, err := b.collect(ctx, targets, elapsed, hasStart, th, !faulted)
 		if err != nil {
 			return nil, fmt.Errorf("collecting telemetry for job %d: %w", j.JobID, err)
 		}
@@ -171,9 +190,10 @@ func (b *Builder) Build(ctx context.Context) ([]JobReport, error) {
 			Job: j, Pods: pods, GPUs: gpus, Elapsed: elapsed,
 			AvgUtil: m.AvgUtil, PeakUtil: m.PeakUtil,
 			PeakMemMiB: m.PeakMemMiB, CapacityMiB: m.CapacityMiB,
-			PeakMemFrac: m.PeakMemFrac,
-			HasData:     m.HasUtil,
-			PerGPU:      idx != nil,
+			PeakMemFrac:   m.PeakMemFrac,
+			HasData:       m.HasUtil,
+			PerGPU:        idx != nil,
+			EngineFaulted: faulted,
 		}
 		if r.HasData {
 			r.WastedH = float64(gpus) * elapsed.Hours() * (1 - m.AvgUtil/100)
@@ -210,11 +230,28 @@ func (b *Builder) targets(nodes []string, nodeToPod map[string]string, idx map[s
 	return out
 }
 
+// engineFaulted reports whether the engine signal looks broken rather than the
+// fleet looking idle: a dcgm-exporter defect makes GR_ENGINE_ACTIVE read 0 on
+// every GPU while GPU_UTIL reads ~100%. A missing series is harmless; a
+// genuine-looking zero would corroborate every idle reading at once. If either
+// query returns nothing the guard stays off.
+func (b *Builder) engineFaulted(ctx context.Context) (bool, error) {
+	eng, engOK, err := b.scalar(ctx, fmt.Sprintf("max(%s)", metricGrEng))
+	if err != nil || !engOK {
+		return false, err
+	}
+	util, utilOK, err := b.scalar(ctx, fmt.Sprintf("max(%s)", metricUtil))
+	if err != nil || !utilOK {
+		return false, err
+	}
+	return eng < faultEngineFrac && util >= faultUtilPct, nil
+}
+
 // collect gathers every DCGM signal for one job's devices and packs them into
 // the judge's input struct. Each signal is independent: a missing profiling
 // metric leaves its Has* flag false and costs the verdict some confidence,
 // but never fails the cycle.
-func (b *Builder) collect(ctx context.Context, targets []target, elapsed time.Duration, hasStart bool, th verdict.Thresholds) (verdict.Metrics, error) {
+func (b *Builder) collect(ctx context.Context, targets []target, elapsed time.Duration, hasStart bool, th verdict.Thresholds, engineOK bool) (verdict.Metrics, error) {
 	m := verdict.Metrics{Elapsed: elapsed, HasStart: hasStart}
 	if len(targets) == 0 {
 		return m, nil // no pods resolved: judged as "no telemetry", never as ok
@@ -262,6 +299,13 @@ func (b *Builder) collect(ctx context.Context, targets []target, elapsed time.Du
 	// Enrichment signals: refine confidence, never block a verdict. These are
 	// DCGM profiling fields. Plenty of installs do not scrape them, so an
 	// empty result is normal and simply leaves the flag false.
+	if engineOK {
+		if gr, ok, err := b.scalar(ctx, b.windowed("max", metricGrEng, targets, win)); err != nil {
+			return m, err
+		} else if ok {
+			m.HasGrEngine, m.PeakGrEngine = true, gr
+		}
+	}
 	if sm, ok, err := b.scalar(ctx, b.windowed("max", metricSM, targets, win)); err != nil {
 		return m, err
 	} else if ok {
