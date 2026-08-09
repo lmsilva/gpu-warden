@@ -49,6 +49,10 @@ type fakeProm struct {
 	// not scrape it at all, which is the common case and what most of these
 	// tests model.
 	engine map[string]float64
+	// seen records every query, so a test can assert on the range a query
+	// covers rather than only on the number that comes back. A pointer
+	// because Query has a value receiver.
+	seen *[]string
 }
 
 var selRe = regexp.MustCompile(`exported_pod=~"\^\(([^)]*)\)\$"(?:,gpu=~"\^\(([^)]*)\)\$")?`)
@@ -87,6 +91,9 @@ func (f fakeProm) devices(q string) []string {
 }
 
 func (f fakeProm) Query(ctx context.Context, q string) ([]promapi.Sample, error) {
+	if f.seen != nil {
+		*f.seen = append(*f.seen, q)
+	}
 	keys := f.devices(q)
 	if len(keys) == 0 {
 		return nil, nil
@@ -373,5 +380,39 @@ func TestQueryShapes(t *testing.T) {
 	}
 	if strings.Contains(c, "_over_time") {
 		t.Errorf("capacity is an instant query, not a windowed one: %s", c)
+	}
+}
+
+// TestWindowClampedToJobAge is the regression test for a job reading its
+// predecessor's telemetry. A 10-minute job with the default 30-minute idle
+// window used to query 30 minutes back, 20 of them before the job existed, so
+// an idle allocation on a recently-busy device came out healthy.
+func TestWindowClampedToJobAge(t *testing.T) {
+	const GiB = 1024.0
+	var seen []string
+	start := time.Now().Add(-10 * time.Minute).Unix()
+	jobs := fakeJobs{jobs: []slurmapi.Job{
+		{JobID: 1, Name: "young", UserName: "luis", State: []string{"RUNNING"},
+			Nodes: "w-0", TresAlloc: "cpu=4,gres/gpu=1",
+			GresDetail: []string{"gpu:1(IDX:0)"},
+			StartTime:  slurmapi.NoVal{Set: true, Number: start}},
+	}}
+	prom := fakeProm{
+		byGPU: map[string]gpu{"pod-w-0/0": {util: 0, fbUsed: 0, fbFree: 15 * GiB}},
+		seen:  &seen,
+	}
+	b := &Builder{Jobs: jobs, Prom: prom, Nodes: fakeNodes{"w-0": "pod-w-0"},
+		PodLabel: "exported_pod", Thresholds: verdict.DefaultThresholds()}
+	if _, err := b.Build(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(seen) == 0 {
+		t.Fatal("no queries recorded")
+	}
+	// The default idle window is 30m. Nothing may ask for it on a 10m job.
+	for _, q := range seen {
+		if strings.Contains(q, "[1800s]") {
+			t.Errorf("query reaches back past the job's start: %s", q)
+		}
 	}
 }

@@ -257,7 +257,12 @@ func (b *Builder) collect(ctx context.Context, targets []target, elapsed time.Du
 		return m, nil // no pods resolved: judged as "no telemetry", never as ok
 	}
 	life := clampDur(elapsed) // the whole run so far
-	win := th.IdleWindow      // the trailing idle window
+	// The trailing window is clamped to the job's own age. Without this, a
+	// job younger than the window reads whatever ran on its devices before it
+	// started - an idle job inherits the previous job's utilization and comes
+	// out healthy. clampDur then floors it so a seconds-old job still gets a
+	// query Prometheus can answer.
+	win := clampDur(verdict.PeakWindow(elapsed, th.IdleWindow))
 
 	// Utilization: the activity signal. Average over the job's life answers
 	// "did this ever work"; peak over the trailing window answers "is it

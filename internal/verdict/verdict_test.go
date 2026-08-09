@@ -187,3 +187,25 @@ func TestJudgeEngineConfidence(t *testing.T) {
 		})
 	}
 }
+
+// TestPeakWindow pins the rule that a peak reading never reaches back past the
+// job's own start. A job younger than the window that inherits its
+// predecessor's utilization reads as healthy while doing nothing, which is the
+// worst failure this tool has: a false all-clear.
+func TestPeakWindow(t *testing.T) {
+	cases := []struct {
+		name    string
+		elapsed time.Duration
+		window  time.Duration
+		want    time.Duration
+	}{
+		{"younger than the window: clamped to its own age", 10 * time.Minute, 30 * time.Minute, 10 * time.Minute},
+		{"older than the window: the window stands", 3 * time.Hour, 30 * time.Minute, 30 * time.Minute},
+		{"exactly the window", 30 * time.Minute, 30 * time.Minute, 30 * time.Minute},
+	}
+	for _, c := range cases {
+		if got := PeakWindow(c.elapsed, c.window); got != c.want {
+			t.Errorf("%s: got %s, want %s", c.name, got, c.want)
+		}
+	}
+}

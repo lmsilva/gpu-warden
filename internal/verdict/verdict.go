@@ -256,7 +256,7 @@ func Judge(m Metrics, th Thresholds) Verdict {
 	if m.PeakUtil >= th.IdleUtilPct {
 		v.Activity = Healthy
 		v.Reasons = append(v.Reasons, fmt.Sprintf("GPU util peak %.0f%% over %s",
-			m.PeakUtil, round(th.IdleWindow)))
+			m.PeakUtil, round(PeakWindow(m.Elapsed, th.IdleWindow))))
 	} else {
 		// Idle is the symptom, not the accusation. Promote to zombie only
 		// when there is a reason to believe the job is not coming back: it
@@ -270,7 +270,7 @@ func Judge(m Metrics, th Thresholds) Verdict {
 			v.Activity = Zombie
 			if longIdle {
 				v.Reasons = append(v.Reasons, fmt.Sprintf("idle %s (peak GPU %.0f%% over %s)",
-					round(m.Elapsed), m.PeakUtil, round(th.IdleWindow)))
+					round(m.Elapsed), m.PeakUtil, round(PeakWindow(m.Elapsed, th.IdleWindow))))
 			}
 			if worked {
 				v.Reasons = append(v.Reasons, fmt.Sprintf("did real work earlier (avg %.0f%%) then went idle - likely crashed",
@@ -364,6 +364,21 @@ func judgeSizing(v *Verdict, m Metrics, th Thresholds) Sizing {
 		return UnderProvisioned
 	}
 	return RightSized
+}
+
+// PeakWindow is the trailing window a peak reading actually covers. It never
+// reaches back past the job's own start: on a job younger than the configured
+// window, the extra time belongs to whatever ran on the device before it, and
+// reading that would credit another job's work to this one.
+//
+// Exported because the collector builds its query from the same number the
+// output quotes. Two copies of this rule would drift, and the drift is
+// invisible - it looks like a busy job.
+func PeakWindow(elapsed, idleWindow time.Duration) time.Duration {
+	if elapsed < idleWindow {
+		return elapsed
+	}
+	return idleWindow
 }
 
 // round trims a duration to whole minutes so the output stays readable.
