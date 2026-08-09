@@ -11,6 +11,20 @@ import (
 
 	"github.com/lmsilva/gpu-warden/internal/promapi"
 	"github.com/lmsilva/gpu-warden/internal/slurmapi"
+	"github.com/lmsilva/gpu-warden/internal/verdict"
+)
+
+// DCGM field names warden reads. Named constants because they appear in
+// several queries and a typo does not fail: Prometheus answers an unknown
+// metric name with an empty vector and HTTP 200, so the mistake looks exactly
+// like "this cluster does not scrape that field".
+const (
+	metricUtil   = "DCGM_FI_DEV_GPU_UTIL"            // percent, 0-100
+	metricFBUsed = "DCGM_FI_DEV_FB_USED"             // framebuffer used, MiB
+	metricFBFree = "DCGM_FI_DEV_FB_FREE"             // framebuffer free, MiB
+	metricSM     = "DCGM_FI_PROF_SM_ACTIVE"          // fraction of SMs active, 0-1
+	metricTensor = "DCGM_FI_PROF_PIPE_TENSOR_ACTIVE" // tensor pipe active, 0-1
+	metricPower  = "DCGM_FI_DEV_POWER_USAGE"         // watts
 )
 
 // Consumer-defined interfaces: report asks only for what it needs.
@@ -22,23 +36,41 @@ type Querier interface {
 	Query(ctx context.Context, promql string) ([]promapi.Sample, error)
 }
 
-// JobReport is one job's joined truth.
+// JobReport is one job's joined truth: the Slurm facts, the telemetry warden
+// measured, and the verdict the judge returned for them.
 type JobReport struct {
-	Job      slurmapi.Job
-	Pods     []string
-	GPUs     int
-	Elapsed  time.Duration
+	Job     slurmapi.Job
+	Pods    []string
+	GPUs    int
+	Elapsed time.Duration
+
 	AvgUtil  float64 // average GPU util (%) across the job's GPUs, since start
-	PeakUtil float64 // peak util (%) over the zombie window
-	WastedH  float64 // GPU-hours of allocated-but-unused capacity
-	HasData  bool    // telemetry actually observed for this job's pods
-	Zombie   bool
+	PeakUtil float64 // peak util (%) over the idle window
+
+	PeakMemMiB  float64 // peak framebuffer used on a single GPU, MiB
+	CapacityMiB float64 // that GPU's total framebuffer, MiB (used + free)
+	PeakMemFrac float64 // PeakMemMiB / CapacityMiB, 0-1
+
+	WastedH float64 // GPU-hours of allocated-but-unused capacity
+	HasData bool    // utilization telemetry actually observed for this job's pods
+
+	Zombie bool
 
 	// PerGPU records whether telemetry was scoped to the exact GPU devices
 	// this job holds. False means the numbers cover every GPU on the job's
 	// nodes, which is only equivalent when the job holds them all.
 	PerGPU bool
+
+	// Verdict is the two-axis judgement. Its zero value reads as
+	// "analyzing / unknown", so a report built before judging never looks
+	// like an all-clear.
+	Verdict verdict.Verdict
 }
+
+// IsZombie is the one-line question the Event path and the exporter ask. It
+// replaces the old boolean field: the judgement lives in one place now, and
+// every caller derives from it rather than keeping a second, drift-prone copy.
+func (r JobReport) IsZombie() bool { return r.Verdict.Activity == verdict.Zombie }
 
 // NodeResolver maps Slurm node names to the Kubernetes pod names that DCGM
 // labels its metrics with. These are DIFFERENT strings — Slurm says "gpu-0",
@@ -50,16 +82,53 @@ type NodeResolver interface {
 }
 
 type Builder struct {
-	Jobs      JobLister
-	Prom      Querier
-	Nodes     NodeResolver
-	PodLabel  string // DCGM label carrying the pod name, e.g. "exported_pod"
+	Jobs     JobLister
+	Prom     Querier
+	Nodes    NodeResolver
+	PodLabel string // DCGM label carrying the pod name, e.g. "exported_pod"
+
+	// Thresholds are the operator's globally-overridden knobs. A zero value
+	// means "use warden's shipped defaults" - otherwise a caller that forgot
+	// to set them would get a judge with a 0s idle window, which would flag
+	// everything.
+	Thresholds verdict.Thresholds
+
 	ZombiePct float64
 	ZombieWin time.Duration
 }
 
+// thresholds returns the configured knobs. Precedence is explicit rather than
+// clever: an operator who set Thresholds meant it; a caller still on the old
+// fields gets those folded into a default set; anyone who set neither gets
+// the shipped defaults, because a judge with a 0s idle window flags every job
+// on the cluster.
+func (b *Builder) thresholds() verdict.Thresholds {
+	if b.Thresholds.IdleWindow != 0 {
+		return b.Thresholds
+	}
+	th := verdict.DefaultThresholds()
+	if b.ZombieWin != 0 {
+		th.IdleWindow = b.ZombieWin
+	}
+	if b.ZombiePct != 0 {
+		th.IdleUtilPct = b.ZombiePct
+	}
+	return th
+}
+
+// podLabel is configuration, not a constant: kube-prometheus-stack renames the
+// exporter's "pod" label to "exported_pod" when it scrapes, because the target
+// label and the scraped label collide.
+func (b *Builder) podLabel() string {
+	if b.PodLabel == "" {
+		return "exported_pod"
+	}
+	return b.PodLabel
+}
+
 // Build produces one JobReport per running GPU job.
 func (b *Builder) Build(ctx context.Context) ([]JobReport, error) {
+	th := b.thresholds()
 	jobs, err := b.Jobs.ListRunningJobs(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("listing jobs: %w", err)
@@ -92,8 +161,13 @@ func (b *Builder) Build(ctx context.Context) ([]JobReport, error) {
 				pods = append(pods, p)
 			}
 		}
-		elapsed := time.Hour // safe default if start_time is unset
-		if j.StartTime.Set && j.StartTime.Number > 0 {
+		// Elapsed drives both the whole-run query window and the judge's
+		// warmup arithmetic. Without a real start_time warden cannot age the
+		// job, and the judge is TOLD so (HasStart) rather than being handed a
+		// plausible-looking guess.
+		hasStart := j.StartTime.Set && j.StartTime.Number > 0
+		elapsed := time.Hour // safe default query window if start_time is unset
+		if hasStart {
 			elapsed = time.Since(time.Unix(j.StartTime.Number, 0))
 		}
 		// Scope telemetry to the exact GPU devices this job holds. On a node
@@ -102,33 +176,33 @@ func (b *Builder) Build(ctx context.Context) ([]JobReport, error) {
 		idx := slurmapi.GPUIndices(j)
 		targets := b.targets(nodes, nodeToPod, idx)
 
-		avg, avgOK, err := b.jobScalar(ctx, targets, "avg", clampDur(elapsed))
+		m, err := b.collect(ctx, targets, elapsed, hasStart, th)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("collecting telemetry for job %d: %w", j.JobID, err)
 		}
-		peak, peakOK, err := b.jobScalar(ctx, targets, "max", b.ZombieWin)
-		if err != nil {
-			return nil, err
-		}
+
 		r := JobReport{
 			Job: j, Pods: pods, GPUs: gpus, Elapsed: elapsed,
-			AvgUtil: avg, PeakUtil: peak, HasData: avgOK && peakOK,
-			PerGPU: idx != nil,
+			AvgUtil: m.AvgUtil, PeakUtil: m.PeakUtil,
+			PeakMemMiB: m.PeakMemMiB, CapacityMiB: m.CapacityMiB,
+			PeakMemFrac: m.PeakMemFrac,
+			HasData:     m.HasUtil,
+			PerGPU:      idx != nil,
 		}
 		if r.HasData {
-			r.WastedH = float64(gpus) * elapsed.Hours() * (1 - avg/100)
+			r.WastedH = float64(gpus) * elapsed.Hours() * (1 - m.AvgUtil/100)
 		}
-		// A zombie verdict requires positive evidence: telemetry present,
-		// a real start time, a full window elapsed, sustained near-zero peak.
-		r.Zombie = r.HasData && j.StartTime.Set &&
-			elapsed >= b.ZombieWin && peak < b.ZombiePct
+		// Every "is this waste" decision happens in one pure function.
+		// report's job is to measure honestly and hand the numbers over.
+		r.Verdict = verdict.Judge(m, th)
+		r.Zombie = r.IsZombie() // set from the verdict; goes away once nothing reads it
 		out = append(out, r)
 	}
 	return out, nil
 }
 
 // target is one pod and, when known, the GPU device indices on it that belong
-// to the job. An empty Indices means "every GPU on this pod" — correct only
+// to the job. An empty Indices means "every GPU on this pod" - correct only
 // when the job holds the whole node.
 type target struct {
 	Pod     string
@@ -151,40 +225,108 @@ func (b *Builder) targets(nodes []string, nodeToPod map[string]string, idx map[s
 	return out
 }
 
-// jobScalar aggregates GPU utilization across exactly the GPUs a job holds,
-// over a window:
-//
-//	agg( agg_over_time(UTIL{pod="p1",gpu=~"^(0|1)$"}[win])
-//	  or agg_over_time(UTIL{pod="p2",gpu=~"^(3)$"}[win]) )
-//
-// One selector per pod, unioned with PromQL's "or" set operator, because the
-// device set differs per node: a single {pod=~"p1|p2", gpu=~"0|1|3"} matcher
-// would form the cross product and pull in GPU 3 on p1, which belongs to
-// somebody else. The second return reports whether any telemetry existed.
-func (b *Builder) jobScalar(ctx context.Context, targets []target, agg string, win time.Duration) (float64, bool, error) {
+// collect gathers every DCGM signal for one job's devices and packs them into
+// the judge's input struct. Each signal is independent: a missing profiling
+// metric leaves its Has* flag false and costs the verdict some confidence,
+// but never fails the cycle.
+func (b *Builder) collect(ctx context.Context, targets []target, elapsed time.Duration, hasStart bool, th verdict.Thresholds) (verdict.Metrics, error) {
+	m := verdict.Metrics{Elapsed: elapsed, HasStart: hasStart}
 	if len(targets) == 0 {
-		return 0, false, nil
+		return m, nil // no pods resolved: judged as "no telemetry", never as ok
 	}
-	// The label name is configuration, not a constant: kube-prometheus-stack
-	// renames the exporter's "pod" to "exported_pod" (preflight check 4).
-	label := b.PodLabel
-	if label == "" {
-		label = "exported_pod"
+	life := clampDur(elapsed) // the whole run so far
+	win := th.IdleWindow      // the trailing idle window
+
+	// Utilization: the activity signal. Average over the job's life answers
+	// "did this ever work"; peak over the trailing window answers "is it
+	// working now". Peak rather than average on the window is deliberate -
+	// one honest spike clears a job of being idle.
+	avgUtil, avgOK, err := b.scalar(ctx, b.windowed("avg", metricUtil, targets, life))
+	if err != nil {
+		return m, err
 	}
+	peakUtil, peakOK, err := b.scalar(ctx, b.windowed("max", metricUtil, targets, win))
+	if err != nil {
+		return m, err
+	}
+	m.AvgUtil, m.PeakUtil, m.HasUtil = avgUtil, peakUtil, avgOK && peakOK
+
+	// Framebuffer memory: the sizing signal. DCGM reports memory in absolute
+	// MiB, so a raw number means nothing without the card's size. Capacity
+	// comes from used+free on the same series, which is how warden learns the
+	// card size without being told what hardware it is on.
+	peakMem, peakMemOK, err := b.scalar(ctx, b.windowed("max", metricFBUsed, targets, life))
+	if err != nil {
+		return m, err
+	}
+	avgMem, avgMemOK, err := b.scalar(ctx, b.windowed("avg", metricFBUsed, targets, life))
+	if err != nil {
+		return m, err
+	}
+	capacity, capOK, err := b.scalar(ctx, b.capacityQuery(targets))
+	if err != nil {
+		return m, err
+	}
+	if peakMemOK && avgMemOK && capOK && capacity > 0 {
+		m.HasMem = true
+		m.PeakMemMiB, m.CapacityMiB = peakMem, capacity
+		m.PeakMemFrac = peakMem / capacity
+		m.AvgMemFrac = avgMem / capacity
+	}
+
+	// Enrichment signals: refine confidence, never block a verdict. These are
+	// DCGM profiling fields. Plenty of installs do not scrape them, so an
+	// empty result is normal and simply leaves the flag false.
+	if sm, ok, err := b.scalar(ctx, b.windowed("max", metricSM, targets, win)); err != nil {
+		return m, err
+	} else if ok {
+		m.HasSM, m.PeakSM = true, sm
+	}
+	if tc, ok, err := b.scalar(ctx, b.windowed("max", metricTensor, targets, win)); err != nil {
+		return m, err
+	} else if ok {
+		m.HasTensor, m.PeakTensor = true, tc
+	}
+	if pw, ok, err := b.scalar(ctx, b.windowed("max", metricPower, targets, win)); err != nil {
+		return m, err
+	} else if ok {
+		m.HasPower, m.PeakPowerW = true, pw
+	}
+	return m, nil
+}
+
+// windowed builds one query aggregating a metric over a window across exactly
+// the GPUs a job holds:
+//
+//	agg( agg_over_time(METRIC{pod="p1",gpu=~"^(0|1)$"}[win])
+//	  or agg_over_time(METRIC{pod="p2",gpu=~"^(3)$"}[win]) )
+//
+// One selector per pod, unioned with PromQL's "or", because the device set
+// differs per node: a single {pod=~"p1|p2",gpu=~"0|1|3"} matcher would form
+// the cross product and pull in GPU 3 on p1, which belongs to somebody else.
+func (b *Builder) windowed(agg, metric string, targets []target, win time.Duration) string {
+	label := b.podLabel()
 	parts := make([]string, 0, len(targets))
 	for _, t := range targets {
-		parts = append(parts, fmt.Sprintf(`%s_over_time(DCGM_FI_DEV_GPU_UTIL{%s}[%s])`,
-			agg, selector(label, t), promDur(win)))
+		parts = append(parts, fmt.Sprintf("%s_over_time(%s{%s}[%s])",
+			agg, metric, selector(label, t), promDur(win)))
 	}
-	q := fmt.Sprintf("%s(%s)", agg, strings.Join(parts, " or "))
-	samples, err := b.Prom.Query(ctx, q)
-	if err != nil {
-		return 0, false, fmt.Errorf("querying gpu util: %w", err)
+	return fmt.Sprintf("%s(%s)", agg, strings.Join(parts, " or "))
+}
+
+// capacityQuery is the one query with no window. Prometheus adds FB_USED and
+// FB_FREE element-by-element - they carry identical labels - giving per-GPU
+// total memory, and max picks the card. Same "or" union, so it stays scoped
+// to the job's own devices.
+func (b *Builder) capacityQuery(targets []target) string {
+	label := b.podLabel()
+	parts := make([]string, 0, len(targets))
+	for _, t := range targets {
+		sel := selector(label, t)
+		parts = append(parts, fmt.Sprintf("(%s{%s} + %s{%s})",
+			metricFBUsed, sel, metricFBFree, sel))
 	}
-	if len(samples) == 0 {
-		return 0, false, nil
-	}
-	return samples[0].Value, true, nil
+	return fmt.Sprintf("max(%s)", strings.Join(parts, " or "))
 }
 
 // selector renders the label matchers for one target. Both matchers are
@@ -200,6 +342,20 @@ func selector(label string, t target) string {
 		quoted[i] = regexp.QuoteMeta(ix)
 	}
 	return fmt.Sprintf(`%s,gpu=~"^(%s)$"`, sel, strings.Join(quoted, "|"))
+}
+
+// scalar runs one PromQL query and returns its single value. The second return
+// reports whether any series existed at all - the difference between "measured
+// zero" and "never measured", which warden must never confuse.
+func (b *Builder) scalar(ctx context.Context, promql string) (float64, bool, error) {
+	samples, err := b.Prom.Query(ctx, promql)
+	if err != nil {
+		return 0, false, fmt.Errorf("querying %q: %w", promql, err)
+	}
+	if len(samples) == 0 {
+		return 0, false, nil
+	}
+	return samples[0].Value, true, nil
 }
 
 func clampDur(d time.Duration) time.Duration {
