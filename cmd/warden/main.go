@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"text/tabwriter"
@@ -69,8 +70,7 @@ type config struct {
 	wide       bool
 
 	// th holds the verdict thresholds. They are a single struct rather than
-	// loose fields so the whole opinion travels together into the Builder and,
-	// later, into a stored verdict row.
+	// loose fields so the whole opinion travels together into the Builder
 	th verdict.Thresholds
 
 	podHostLabel   string // POD label carrying the Slurm node name
@@ -118,9 +118,6 @@ func parseConfig() config {
 	flag.Float64Var(&c.th.MemFloorFrac, "mem-floor", def.MemFloorFrac, "peak memory fraction below which a job is over-provisioned")
 	flag.Parse()
 
-	// The remaining three knobs stay compiled-in: they only ever move together
-	// with the ones above, and every extra flag is a way to misconfigure
-	// warden.
 	c.th.BurstMemFrac = def.BurstMemFrac
 	c.th.UnderUtilPct = def.UnderUtilPct
 	c.th.UnderMemFrac = def.UnderMemFrac
@@ -157,9 +154,6 @@ func main() {
 		if c.watch > 0 {
 			fmt.Println("note: --watch is ignored with --serve; Prometheus sets the cadence")
 		}
-		// The cache matters more than it used to: a build is now EIGHT
-		// Prometheus queries per GPU job rather than two, so an uncached
-		// endpoint would be four times the amplifier it was.
 		cache := newCycleCache(c.serveCache)
 
 		// A private mux, not http.DefaultServeMux. The default mux is process
@@ -356,7 +350,11 @@ func printTable(out io.Writer, reports []report.JobReport, c config) {
 			r.Elapsed.Round(time.Minute), r.AvgUtil, r.PeakUtil, mem, cost,
 			activity, sizing)
 		if c.wide {
-			fmt.Fprintf(w, "\t%s", truncate(v.Reason(), 64))
+			// Every reason, not just the first. Judge appends them in
+			// priority order: what the GPU is doing, then anything that
+			// argued with it, then sizing. The first alone can assert
+			// over-provisioned and never say on what evidence.
+			fmt.Fprintf(w, "\t%s", strings.Join(v.Reasons, "; "))
 		}
 		fmt.Fprintln(w)
 	}
@@ -364,14 +362,6 @@ func printTable(out io.Writer, reports []report.JobReport, c config) {
 	if anyPodWide {
 		fmt.Fprintln(out, "\n* GPU indices unavailable (no gres_detail): telemetry covers every GPU on the job's nodes.")
 	}
-}
-
-// truncate keeps one reason on one terminal line.
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n-1] + "…"
 }
 
 // eventLog remembers when each job was last Evented, so a job is not
