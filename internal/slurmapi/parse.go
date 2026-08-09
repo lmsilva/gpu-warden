@@ -111,7 +111,7 @@ func gpusIn(s string) int {
 // version. On slurmrestd v0.0.44, tres_alloc_str carries NO gres entry at all —
 // a running GPU job reports only "cpu=4,mem=15785M,node=1,billing=4" — so a
 // parser trusting that field alone finds zero GPUs for every job, the report
-// builder filters them all out, and warden prints an empty table with no error
+// builder filters them all out, and Squire prints an empty table with no error
 // at all. Verified against a live cluster; do not "simplify" this to one field.
 //
 //	gres_detail    ["gpu:1(IDX:0)"]        one entry per allocated node
@@ -155,7 +155,7 @@ func ExpandNodes(nodes string) ([]string, error) {
 // slurmrestd resolves UIDs against the passwd database of ITS OWN container,
 // which is the stock slurmrestd image — it does not contain cluster users who
 // exist only in the worker and login images. So user_name comes back empty for
-// exactly the users warden most needs to name (root resolves everywhere and
+// exactly the users Squire most needs to name (root resolves everywhere and
 // looks fine, which hides the problem). The numeric UID is always present and
 // always correct, so fall back to it rather than printing a blank cell.
 func (j Job) Owner() string {

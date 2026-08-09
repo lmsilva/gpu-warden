@@ -106,7 +106,7 @@ func TestJudge(t *testing.T) {
 }
 
 // TestJudgeEngineConfidence covers the optional engine signals. They must never
-// change WHAT warden finds — only how confident it is and what it says — so
+// change WHAT Squire finds — only how confident it is and what it says — so
 // every case below asserts the activity verdict is untouched.
 func TestJudgeEngineConfidence(t *testing.T) {
 	th := DefaultThresholds()

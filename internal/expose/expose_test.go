@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lmsilva/gpu-warden/internal/report"
-	"github.com/lmsilva/gpu-warden/internal/slurmapi"
+	"github.com/lmsilva/squire/internal/report"
+	"github.com/lmsilva/squire/internal/slurmapi"
 )
 
 func TestWriteEscapesLabels(t *testing.T) {

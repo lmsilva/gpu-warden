@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# setup.sh — verify this machine can build and run gpu-warden, then warm the
+# setup.sh — verify this machine can build and run squire, then warm the
 # module cache. Safe to re-run; it changes nothing outside the module cache.
 #
 #   ./scripts/setup.sh
@@ -20,7 +20,7 @@ ylw() { printf '\033[33m%s\033[0m\n' "$*"; }
 MIN_GO_MINOR=21   # generics + slices/maps stdlib packages
 problems=0
 
-echo "gpu-warden setup check"
+echo "squire setup check"
 echo "  repo: $(pwd)"
 echo
 
@@ -49,10 +49,10 @@ if command -v kubectl >/dev/null 2>&1; then
   if kubectl cluster-info >/dev/null 2>&1; then
     grn "  cluster   reachable ($(kubectl config current-context 2>/dev/null))"
   else
-    ylw "  cluster   unreachable — fine for building, required to run warden"
+    ylw "  cluster   unreachable — fine for building, required to run Squire"
   fi
 else
-  ylw "  kubectl   not found — fine for building, required to run warden"
+  ylw "  kubectl   not found — fine for building, required to run Squire"
 fi
 
 # --- module cache -----------------------------------------------------------
@@ -76,7 +76,7 @@ if [ -f go.mod ]; then
   fi
 else
   red "  go.mod not found. Run this from the repo, after:"
-  echo "      go mod init github.com/lmsilva/gpu-warden"
+  echo "      go mod init github.com/lmsilva/squire"
   problems=$((problems + 1))
 fi
 
@@ -87,8 +87,8 @@ if [ "$problems" -eq 0 ]; then
   cat <<'EOF'
 
   Next:
-    ./scripts/dev-tunnels.sh && source .warden-env    open tunnels, mint a JWT
-    go run ./cmd/warden --help                        confirm the binary builds
+    ./scripts/dev-tunnels.sh && source .squire-env    open tunnels, mint a JWT
+    go run ./cmd/Squire --help                        confirm the binary builds
 
 EOF
 else

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # dev-tunnels.sh — tear down and re-establish the three port-forwards
-# gpu-warden needs, then mint a fresh Slurm JWT.
+# squire needs, then mint a fresh Slurm JWT.
 #
 #   ./scripts/dev-tunnels.sh          start (or restart) everything
 #   ./scripts/dev-tunnels.sh --stop   tear the tunnels down and exit
@@ -18,8 +18,8 @@ PROM_SVC="${PROM_SVC:-prometheus-kube-prometheus-prometheus}"
 RESTAPI_SVC="${RESTAPI_SVC:-slurm-restapi}"
 CTLD_POD="${CTLD_POD:-slurm-controller-0}"
 
-RUN_DIR="${TMPDIR:-/tmp}/gpu-warden"
-ENV_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.warden-env"
+RUN_DIR="${TMPDIR:-/tmp}/squire"
+ENV_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.squire-env"
 mkdir -p "$RUN_DIR"
 
 red()  { printf '\033[31m%s\033[0m\n' "$*"; }
@@ -155,7 +155,7 @@ else
 fi
 cat <<EOF
 
-  Load the token into THIS shell:   source .warden-env
+  Load the token into THIS shell:   source .squire-env
   Prometheus UI:                    http://localhost:9090
   Grafana UI:                       http://localhost:3000  (user: admin)
   Grafana password:

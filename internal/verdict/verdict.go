@@ -103,7 +103,7 @@ func (c Confidence) String() string {
 }
 
 // Enrichment cut-offs. These are constants rather than Thresholds fields on
-// purpose: they change how loudly warden speaks, never what it finds, so they
+// purpose: they change how loudly Squire speaks, never what it finds, so they
 // are not an operator's dial. Anything that can change a finding belongs in
 // Thresholds where it can be overridden and, later, recorded.
 const (
@@ -175,7 +175,7 @@ type Thresholds struct {
 	UnderMemFrac float64 // avg memory at or above this is an under-provisioned candidate
 }
 
-// DefaultThresholds is warden's opinion. Every number leans toward
+// DefaultThresholds is Squire's opinion. Every number leans toward
 // under-flagging: a missed zombie costs a little money, a false accusation
 // costs the tool its credibility.
 func DefaultThresholds() Thresholds {

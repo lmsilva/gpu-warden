@@ -1,4 +1,4 @@
-module github.com/lmsilva/gpu-warden
+module github.com/lmsilva/squire
 
 go 1.26.5
 

@@ -15,12 +15,12 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/lmsilva/gpu-warden/internal/expose"
-	"github.com/lmsilva/gpu-warden/internal/kube"
-	"github.com/lmsilva/gpu-warden/internal/promapi"
-	"github.com/lmsilva/gpu-warden/internal/report"
-	"github.com/lmsilva/gpu-warden/internal/slurmapi"
-	"github.com/lmsilva/gpu-warden/internal/verdict"
+	"github.com/lmsilva/squire/internal/expose"
+	"github.com/lmsilva/squire/internal/kube"
+	"github.com/lmsilva/squire/internal/promapi"
+	"github.com/lmsilva/squire/internal/report"
+	"github.com/lmsilva/squire/internal/slurmapi"
+	"github.com/lmsilva/squire/internal/verdict"
 )
 
 // cycleTimeout bounds one build of the reports, in either mode. The server's
@@ -90,15 +90,15 @@ func parseConfig() config {
 	// compiled-in opinion can never drift apart.
 	def := verdict.DefaultThresholds()
 
-	flag.StringVar(&c.slurmURL, "slurm-url", envOr("WARDEN_SLURM_URL", "http://localhost:6820"), "slurmrestd base URL")
-	flag.StringVar(&c.slurmVer, "slurm-api", envOr("WARDEN_SLURM_API", "v0.0.44"), "slurmrestd API version")
-	flag.StringVar(&c.promURL, "prom-url", envOr("WARDEN_PROM_URL", "http://localhost:9090"), "Prometheus base URL")
+	flag.StringVar(&c.slurmURL, "slurm-url", envOr("SQUIRE_SLURM_URL", "http://localhost:6820"), "slurmrestd base URL")
+	flag.StringVar(&c.slurmVer, "slurm-api", envOr("SQUIRE_SLURM_API", "v0.0.44"), "slurmrestd API version")
+	flag.StringVar(&c.promURL, "prom-url", envOr("SQUIRE_PROM_URL", "http://localhost:9090"), "Prometheus base URL")
 	flag.StringVar(&c.kubeconfig, "kubeconfig", os.Getenv("KUBECONFIG"), "kubeconfig path (default: in-cluster if in a pod, else ~/.kube/config)")
-	flag.StringVar(&c.namespace, "namespace", envOr("WARDEN_NAMESPACE", "slurm"), "namespace of Slurm worker pods")
+	flag.StringVar(&c.namespace, "namespace", envOr("SQUIRE_NAMESPACE", "slurm"), "namespace of Slurm worker pods")
 	// podHostLabel is on the POD (Kubernetes) and carries the Slurm node name.
 	// podMetricLabel is on the DCGM SERIES (Prometheus) and carries the pod name.
-	flag.StringVar(&c.podHostLabel, "pod-hostname-label", envOr("WARDEN_POD_HOSTNAME_LABEL", "nodeset.slinky.slurm.net/pod-hostname"), "pod label carrying the Slurm node name")
-	flag.StringVar(&c.podMetricLabel, "pod-label", envOr("WARDEN_POD_LABEL", "exported_pod"), "DCGM metric label carrying the pod name")
+	flag.StringVar(&c.podHostLabel, "pod-hostname-label", envOr("SQUIRE_POD_HOSTNAME_LABEL", "nodeset.slinky.slurm.net/pod-hostname"), "pod label carrying the Slurm node name")
+	flag.StringVar(&c.podMetricLabel, "pod-label", envOr("SQUIRE_POD_LABEL", "exported_pod"), "DCGM metric label carrying the pod name")
 	flag.StringVar(&c.serveAddr, "serve", "", "if set (e.g. :9410), expose /metrics instead of printing a table")
 	flag.DurationVar(&c.serveCache, "serve-cache", 30*time.Second, "minimum age of a cached build before /metrics rebuilds (0 disables)")
 	flag.DurationVar(&c.watch, "watch", 0, "refresh interval for top mode (0 = print once)")
@@ -106,7 +106,7 @@ func parseConfig() config {
 	flag.Float64Var(&c.dollarRate, "dollar-rate", 0, "optional $/GPU-hour for waste costing")
 	flag.BoolVar(&c.wide, "wide", false, "show the evidence behind each verdict")
 
-	// Threshold overrides. These are GLOBAL, per warden instance — there is
+	// Threshold overrides. These are GLOBAL, per Squire instance — there is
 	// deliberately no per-job knob, so nobody can tune away an inconvenient
 	// verdict on their own job.
 	flag.DurationVar(&c.th.GraceCeiling, "grace", def.GraceCeiling, "warmup ceiling before a job can be judged")
@@ -149,7 +149,7 @@ func main() {
 	// One event log for the process lifetime, shared by every cycle.
 	ev := newEventLog()
 
-	// --serve turns warden into an exporter.
+	// --serve turns Squire into an exporter.
 	if c.serveAddr != "" {
 		if c.watch > 0 {
 			fmt.Println("note: --watch is ignored with --serve; Prometheus sets the cadence")
@@ -162,7 +162,7 @@ func main() {
 		mux := http.NewServeMux()
 		mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 			// Derive from the request, not Background: a scrape Prometheus
-			// abandons cancels warden's in-flight calls instead of leaving them
+			// abandons cancels Squire's in-flight calls instead of leaving them
 			// to finish into a closed connection.
 			ctx, cancel := context.WithTimeout(r.Context(), scrapeBudget(r))
 			defer cancel()
@@ -238,7 +238,7 @@ func main() {
 // cycleCache serves the last successful build to any scrape arriving within
 // minAge of it. Without it every scrape runs a full fan-out across Slurm,
 // Kubernetes and Prometheus, so an unauthenticated caller in a loop amplifies
-// into those services rather than into warden.
+// into those services rather than into Squire.
 //
 // sem is a one-slot channel used as a lock, held across the build on purpose:
 // a scrape arriving mid-build waits, then finds the cache fresh and returns

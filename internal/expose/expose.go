@@ -6,8 +6,8 @@ import (
 	"io"
 	"strings"
 
-	"github.com/lmsilva/gpu-warden/internal/report"
-	"github.com/lmsilva/gpu-warden/internal/verdict"
+	"github.com/lmsilva/squire/internal/report"
+	"github.com/lmsilva/squire/internal/verdict"
 )
 
 // The full enum sets. Every job emits one series per state carrying 0 or 1, so
@@ -20,7 +20,7 @@ var (
 )
 
 // mib is the number of bytes in a mebibyte. DCGM reports framebuffer in MiB,
-// but Prometheus convention is base units, so warden converts on the way out.
+// but Prometheus convention is base units, so Squire converts on the way out.
 const mib = 1024 * 1024
 
 // esc escapes a label value per the Prometheus exposition format.
@@ -46,26 +46,26 @@ func ids(r report.JobReport) string {
 		r.Job.JobID, esc(r.Job.Owner()), esc(r.Job.Partition))
 }
 
-// Write renders one scrape's worth of warden metrics.
+// Write renders one scrape's worth of Squire metrics.
 func Write(w io.Writer, reports []report.JobReport) {
-	fmt.Fprintln(w, "# HELP warden_job_gpu_utilization_percent Average GPU utilization per running job.")
-	fmt.Fprintln(w, "# TYPE warden_job_gpu_utilization_percent gauge")
+	fmt.Fprintln(w, "# HELP squire_job_gpu_utilization_percent Average GPU utilization per running job.")
+	fmt.Fprintln(w, "# TYPE squire_job_gpu_utilization_percent gauge")
 	for _, r := range reports {
-		fmt.Fprintf(w, "warden_job_gpu_utilization_percent{%s} %.2f\n", ids(r), r.AvgUtil)
+		fmt.Fprintf(w, "squire_job_gpu_utilization_percent{%s} %.2f\n", ids(r), r.AvgUtil)
 	}
 
-	fmt.Fprintln(w, "# HELP warden_job_gpu_hours_wasted Allocated-but-unused GPU-hours per running job.")
-	fmt.Fprintln(w, "# TYPE warden_job_gpu_hours_wasted gauge")
+	fmt.Fprintln(w, "# HELP squire_job_gpu_hours_wasted Allocated-but-unused GPU-hours per running job.")
+	fmt.Fprintln(w, "# TYPE squire_job_gpu_hours_wasted gauge")
 	for _, r := range reports {
-		fmt.Fprintf(w, "warden_job_gpu_hours_wasted{%s} %.2f\n", ids(r), r.WastedH)
+		fmt.Fprintf(w, "squire_job_gpu_hours_wasted{%s} %.2f\n", ids(r), r.WastedH)
 	}
 
 	// Axis A. One series per state per job; exactly one carries a 1.
-	fmt.Fprintln(w, "# HELP warden_job_activity Job activity verdict: 1 on the state currently held (analyzing, healthy, idle, zombie).")
-	fmt.Fprintln(w, "# TYPE warden_job_activity gauge")
+	fmt.Fprintln(w, "# HELP squire_job_activity Job activity verdict: 1 on the state currently held (analyzing, healthy, idle, zombie).")
+	fmt.Fprintln(w, "# TYPE squire_job_activity gauge")
 	for _, r := range reports {
 		for _, a := range activities {
-			fmt.Fprintf(w, "warden_job_activity{%s,state=\"%s\"} %d\n",
+			fmt.Fprintf(w, "squire_job_activity{%s,state=\"%s\"} %d\n",
 				ids(r), a, bit(r.Verdict.Activity == a))
 		}
 	}
@@ -73,11 +73,11 @@ func Write(w io.Writer, reports []report.JobReport) {
 	// Axis B. Sizing uses Code() rather than String(): "possibly
 	// under-provisioned" contains spaces, which is legal in a label value but
 	// miserable to type in a PromQL matcher.
-	fmt.Fprintln(w, "# HELP warden_job_sizing Job sizing verdict: 1 on the state currently held (unknown, right_sized, over_provisioned, under_provisioned).")
-	fmt.Fprintln(w, "# TYPE warden_job_sizing gauge")
+	fmt.Fprintln(w, "# HELP squire_job_sizing Job sizing verdict: 1 on the state currently held (unknown, right_sized, over_provisioned, under_provisioned).")
+	fmt.Fprintln(w, "# TYPE squire_job_sizing gauge")
 	for _, r := range reports {
 		for _, s := range sizings {
-			fmt.Fprintf(w, "warden_job_sizing{%s,state=\"%s\"} %d\n",
+			fmt.Fprintf(w, "squire_job_sizing{%s,state=\"%s\"} %d\n",
 				ids(r), s.Code(), bit(r.Verdict.Sizing == s))
 		}
 	}
@@ -85,33 +85,33 @@ func Write(w io.Writer, reports []report.JobReport) {
 	// Confidence is ordinal, so it is a number (0 none, 1 low, 2 medium,
 	// 3 high) rather than a label — that way an alert can say
 	// "zombie AND confidence >= 3" with plain arithmetic.
-	fmt.Fprintln(w, "# HELP warden_job_verdict_confidence Confidence in the activity verdict: 0 none, 1 low, 2 medium, 3 high.")
-	fmt.Fprintln(w, "# TYPE warden_job_verdict_confidence gauge")
+	fmt.Fprintln(w, "# HELP squire_job_verdict_confidence Confidence in the activity verdict: 0 none, 1 low, 2 medium, 3 high.")
+	fmt.Fprintln(w, "# TYPE squire_job_verdict_confidence gauge")
 	for _, r := range reports {
-		fmt.Fprintf(w, "warden_job_verdict_confidence{%s} %d\n",
+		fmt.Fprintf(w, "squire_job_verdict_confidence{%s} %d\n",
 			ids(r), int(r.Verdict.Confidence))
 	}
 
 	// Memory, in bytes, per Prometheus base-unit convention. Emitting peak and
 	// capacity separately (rather than a precomputed ratio) lets a dashboard
 	// divide them itself and keeps the raw evidence visible.
-	fmt.Fprintln(w, "# HELP warden_job_gpu_memory_peak_bytes Peak framebuffer memory used on a single GPU of the job.")
-	fmt.Fprintln(w, "# TYPE warden_job_gpu_memory_peak_bytes gauge")
+	fmt.Fprintln(w, "# HELP squire_job_gpu_memory_peak_bytes Peak framebuffer memory used on a single GPU of the job.")
+	fmt.Fprintln(w, "# TYPE squire_job_gpu_memory_peak_bytes gauge")
 	for _, r := range reports {
-		fmt.Fprintf(w, "warden_job_gpu_memory_peak_bytes{%s} %.0f\n", ids(r), r.PeakMemMiB*mib)
+		fmt.Fprintf(w, "squire_job_gpu_memory_peak_bytes{%s} %.0f\n", ids(r), r.PeakMemMiB*mib)
 	}
-	fmt.Fprintln(w, "# HELP warden_job_gpu_memory_capacity_bytes Total framebuffer memory of the GPU the job holds.")
-	fmt.Fprintln(w, "# TYPE warden_job_gpu_memory_capacity_bytes gauge")
+	fmt.Fprintln(w, "# HELP squire_job_gpu_memory_capacity_bytes Total framebuffer memory of the GPU the job holds.")
+	fmt.Fprintln(w, "# TYPE squire_job_gpu_memory_capacity_bytes gauge")
 	for _, r := range reports {
-		fmt.Fprintf(w, "warden_job_gpu_memory_capacity_bytes{%s} %.0f\n", ids(r), r.CapacityMiB*mib)
+		fmt.Fprintf(w, "squire_job_gpu_memory_capacity_bytes{%s} %.0f\n", ids(r), r.CapacityMiB*mib)
 	}
 
 	// Kept for compatibility with anything already alerting on it. It is now
 	// derived from the Activity axis rather than being an independent flag,
 	// so the two can never disagree.
-	fmt.Fprintln(w, "# HELP warden_job_zombie 1 if the job is judged a zombie allocation.")
-	fmt.Fprintln(w, "# TYPE warden_job_zombie gauge")
+	fmt.Fprintln(w, "# HELP squire_job_zombie 1 if the job is judged a zombie allocation.")
+	fmt.Fprintln(w, "# TYPE squire_job_zombie gauge")
 	for _, r := range reports {
-		fmt.Fprintf(w, "warden_job_zombie{%s} %d\n", ids(r), bit(r.IsZombie()))
+		fmt.Fprintf(w, "squire_job_zombie{%s} %d\n", ids(r), bit(r.IsZombie()))
 	}
 }

@@ -1,4 +1,4 @@
-// Package slurmapi is a minimal slurmrestd client for warden's needs.
+// Package slurmapi is a minimal slurmrestd client for Squire's needs.
 package slurmapi
 
 import (

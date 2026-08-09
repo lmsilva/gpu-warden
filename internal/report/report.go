@@ -9,12 +9,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lmsilva/gpu-warden/internal/promapi"
-	"github.com/lmsilva/gpu-warden/internal/slurmapi"
-	"github.com/lmsilva/gpu-warden/internal/verdict"
+	"github.com/lmsilva/squire/internal/promapi"
+	"github.com/lmsilva/squire/internal/slurmapi"
+	"github.com/lmsilva/squire/internal/verdict"
 )
 
-// DCGM field names warden reads. Named constants because they appear in
+// DCGM field names Squire reads. Named constants because they appear in
 // several queries and a typo does not fail: Prometheus answers an unknown
 // metric name with an empty vector and HTTP 200, so the mistake looks exactly
 // like "this cluster does not scrape that field".
@@ -45,7 +45,7 @@ type Querier interface {
 	Query(ctx context.Context, promql string) ([]promapi.Sample, error)
 }
 
-// JobReport is one job's joined truth: the Slurm facts, the telemetry warden
+// JobReport is one job's joined truth: the Slurm facts, the telemetry Squire
 // measured, and the verdict the judge returned for them.
 type JobReport struct {
 	Job     slurmapi.Job
@@ -100,7 +100,7 @@ type Builder struct {
 	PodLabel string // DCGM label carrying the pod name, e.g. "exported_pod"
 
 	// Thresholds are the operator's globally-overridden knobs. A zero value
-	// means "use warden's shipped defaults" - otherwise a caller that forgot
+	// means "use Squire's shipped defaults" - otherwise a caller that forgot
 	// to set them would get a judge with a 0s idle window, which would flag
 	// everything.
 	Thresholds verdict.Thresholds
@@ -152,7 +152,7 @@ func (b *Builder) Build(ctx context.Context) ([]JobReport, error) {
 	for _, j := range jobs {
 		gpus := slurmapi.GPUCount(j)
 		if gpus == 0 {
-			continue // CPU-only jobs are outside warden's mandate
+			continue // CPU-only jobs are outside Squire's mandate
 		}
 		nodes, err := slurmapi.ExpandNodes(j.Nodes)
 		if err != nil {
@@ -167,7 +167,7 @@ func (b *Builder) Build(ctx context.Context) ([]JobReport, error) {
 			}
 		}
 		// Elapsed drives both the whole-run query window and the judge's
-		// warmup arithmetic. Without a real start_time warden cannot age the
+		// warmup arithmetic. Without a real start_time Squire cannot age the
 		// job, and the judge is TOLD so (HasStart) rather than being handed a
 		// plausible-looking guess.
 		hasStart := j.StartTime.Set && j.StartTime.Number > 0
@@ -275,7 +275,7 @@ func (b *Builder) collect(ctx context.Context, targets []target, elapsed time.Du
 
 	// Framebuffer memory: the sizing signal. DCGM reports memory in absolute
 	// MiB, so a raw number means nothing without the card's size. Capacity
-	// comes from used+free on the same series, which is how warden learns the
+	// comes from used+free on the same series, which is how Squire learns the
 	// card size without being told what hardware it is on.
 	peakMem, peakMemOK, err := b.scalar(ctx, b.windowed("max", metricFBUsed, targets, life))
 	if err != nil {
@@ -375,7 +375,7 @@ func selector(label string, t target) string {
 
 // scalar runs one PromQL query and returns its single value. The second return
 // reports whether any series existed at all - the difference between "measured
-// zero" and "never measured", which warden must never confuse.
+// zero" and "never measured", which Squire must never confuse.
 func (b *Builder) scalar(ctx context.Context, promql string) (float64, bool, error) {
 	samples, err := b.Prom.Query(ctx, promql)
 	if err != nil {

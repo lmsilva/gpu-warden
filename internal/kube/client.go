@@ -1,4 +1,4 @@
-// Package kube provides warden's Kubernetes access: pod identity and Events.
+// Package kube provides Squire's Kubernetes access: pod identity and Events.
 package kube
 
 import (
@@ -91,7 +91,7 @@ func (c *Client) EmitZombieEvent(ctx context.Context, pod *corev1.Pod, jobID int
 	now := metav1.Now()
 	ev := &corev1.Event{
 		ObjectMeta: metav1.ObjectMeta{
-			GenerateName: "gpu-warden-", Namespace: pod.Namespace,
+			GenerateName: "squire-", Namespace: pod.Namespace,
 		},
 		InvolvedObject: corev1.ObjectReference{
 			APIVersion: "v1", Kind: "Pod",
@@ -100,7 +100,7 @@ func (c *Client) EmitZombieEvent(ctx context.Context, pod *corev1.Pod, jobID int
 		Type:           corev1.EventTypeWarning,
 		Reason:         "GPUAllocationIdle",
 		Message:        fmt.Sprintf("slurm job %d (user %s) holds GPUs with no activity: %s", jobID, user, detail),
-		Source:         corev1.EventSource{Component: "gpu-warden"},
+		Source:         corev1.EventSource{Component: "squire"},
 		FirstTimestamp: now, LastTimestamp: now, Count: 1,
 	}
 	if _, err := c.cs.CoreV1().Events(pod.Namespace).Create(ctx, ev, metav1.CreateOptions{}); err != nil {

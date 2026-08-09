@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lmsilva/gpu-warden/internal/promapi"
-	"github.com/lmsilva/gpu-warden/internal/slurmapi"
-	"github.com/lmsilva/gpu-warden/internal/verdict"
+	"github.com/lmsilva/squire/internal/promapi"
+	"github.com/lmsilva/squire/internal/slurmapi"
+	"github.com/lmsilva/squire/internal/verdict"
 )
 
 type fakeJobs struct{ jobs []slurmapi.Job }

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lmsilva/gpu-warden/internal/report"
+	"github.com/lmsilva/squire/internal/report"
 )
 
 // TestEventLogClaimRespectsWindow is the behaviour --watch already relied on:
