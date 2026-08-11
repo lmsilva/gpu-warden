@@ -41,6 +41,8 @@ Telemetry is scoped to the **exact GPU devices a job holds**, read from Slurm's 
 
 Where Slurm does not publish `gres_detail`, Squire falls back to node-wide scoping and **marks the row with `*`** plus a footnote. It never quietly presents node-wide numbers as if they were the job's own.
 
+Note: Measured on a shared 4-GPU node: two jobs, one pod, one holding GPUs 0-1 and the other GPUs 2-3. DCGM read 0% on the first pair and 100% on the second at the same moment, and Squire reported each job only its own. Scoped by pod alone, both jobs would have read 100%.
+
 ---
 
 ## The signals Squire reads, and why

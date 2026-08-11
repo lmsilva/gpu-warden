@@ -39,6 +39,21 @@ var idxSpec = regexp.MustCompile(`IDX:([0-9,\-]+)`)
 // Returns nil when the indices cannot be determined — gres_detail absent, a
 // length mismatch against the node list, or no IDX field. Callers MUST treat
 // nil as "scope by pod only and say so", never as "no GPUs".
+//
+// These indices are only useful if they name the same devices DCGM labels. They
+// need not: Slurm's explicit File=/dev/nvidiaN list counts driver minor numbers,
+// while DCGM counts NVML indices, which follow PCI bus order, as measured on a
+// 4x Tesla T4 node, 2026-08-11, joining the two by UUID:
+//
+//	bus 00:1B.0  GPU-7b35ecac  minor 0  NVML 0  DCGM gpu="0"
+//	bus 00:1C.0  GPU-e629cf53  minor 1  NVML 1  DCGM gpu="1"
+//	bus 00:1D.0  GPU-0b2fefcd  minor 2  NVML 2  DCGM gpu="2"
+//	bus 00:1E.0  GPU-0cd970b7  minor 3  NVML 3  DCGM gpu="3"
+//
+// Two jobs on that node held IDX:0-1 and IDX:2-3; DCGM read 0% on gpu 0-1 and
+// 100% on gpu 2-3 at the same instant, on one pod. The numberings agreed here.
+// Nothing guarantees they agree everywhere, so treat this as a measurement on
+// one machine rather than a property of Slurm.
 func GPUIndices(j Job) map[string][]string {
 	if len(j.GresDetail) == 0 {
 		return nil
