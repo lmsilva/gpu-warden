@@ -91,7 +91,7 @@ These are **global to the Squire instance**. There are deliberately no per-job k
 ```
 source ./env.sh
 ./scripts/setup.sh
-./scripts/dev-tunnels.sh && source .Squire-env
+./scripts/dev-tunnels.sh && source .squire-env
 (setup port forwarding for slurm rest API, prometheus and grafana, mint a new JWT Token)
 ```
 
