@@ -20,6 +20,7 @@ import (
 	"github.com/lmsilva/squire/internal/promapi"
 	"github.com/lmsilva/squire/internal/report"
 	"github.com/lmsilva/squire/internal/slurmapi"
+	"github.com/lmsilva/squire/internal/slurmcfg"
 	"github.com/lmsilva/squire/internal/verdict"
 )
 
@@ -56,9 +57,10 @@ func scrapeBudget(r *http.Request) time.Duration {
 }
 
 type config struct {
-	slurmURL   string
-	slurmVer   string
-	slurmToken string
+	// Config carries the Slurm connection settings, bound from the same
+	// place the configuration check binds them so the two cannot drift.
+	slurmcfg.Config
+
 	promURL    string
 	kubeconfig string
 	namespace  string
@@ -84,53 +86,66 @@ func envOr(key, def string) string {
 	return def
 }
 
-func parseConfig() config {
+// parseConfig builds the configuration for the monitoring modes from args,
+// which excludes the program name. Taking the arguments rather than reading
+// os.Args means each mode parses its own list and nothing rewrites a global.
+//
+// The configuration check is a separate binary with its own, much smaller set.
+// Sharing one would mean its help listing thresholds and Kubernetes settings it
+// never reads, and linking a Kubernetes client it never calls.
+func parseConfig(args []string) config {
 	var c config
+	fs := flag.NewFlagSet("squire", flag.ExitOnError)
+	slurmcfg.Bind(fs, &c.Config)
 	// Defaults come from the verdict package, so the flag help text and the
 	// compiled-in opinion can never drift apart.
 	def := verdict.DefaultThresholds()
 
-	flag.StringVar(&c.slurmURL, "slurm-url", envOr("SQUIRE_SLURM_URL", "http://localhost:6820"), "slurmrestd base URL")
-	flag.StringVar(&c.slurmVer, "slurm-api", envOr("SQUIRE_SLURM_API", "v0.0.44"), "slurmrestd API version")
-	flag.StringVar(&c.promURL, "prom-url", envOr("SQUIRE_PROM_URL", "http://localhost:9090"), "Prometheus base URL")
-	flag.StringVar(&c.kubeconfig, "kubeconfig", os.Getenv("KUBECONFIG"), "kubeconfig path (default: in-cluster if in a pod, else ~/.kube/config)")
-	flag.StringVar(&c.namespace, "namespace", envOr("SQUIRE_NAMESPACE", "slurm"), "namespace of Slurm worker pods")
+	fs.StringVar(&c.promURL, "prom-url", envOr("SQUIRE_PROM_URL", "http://localhost:9090"), "Prometheus base URL")
+	fs.StringVar(&c.kubeconfig, "kubeconfig", os.Getenv("KUBECONFIG"), "kubeconfig path (default: in-cluster if in a pod, else ~/.kube/config)")
+	fs.StringVar(&c.namespace, "namespace", envOr("SQUIRE_NAMESPACE", "slurm"), "namespace of Slurm worker pods")
 	// podHostLabel is on the POD (Kubernetes) and carries the Slurm node name.
 	// podMetricLabel is on the DCGM SERIES (Prometheus) and carries the pod name.
-	flag.StringVar(&c.podHostLabel, "pod-hostname-label", envOr("SQUIRE_POD_HOSTNAME_LABEL", "nodeset.slinky.slurm.net/pod-hostname"), "pod label carrying the Slurm node name")
-	flag.StringVar(&c.podMetricLabel, "pod-label", envOr("SQUIRE_POD_LABEL", "exported_pod"), "DCGM metric label carrying the pod name")
-	flag.StringVar(&c.serveAddr, "serve", "", "if set (e.g. :9410), expose /metrics instead of printing a table")
-	flag.DurationVar(&c.serveCache, "serve-cache", 30*time.Second, "minimum age of a cached build before /metrics rebuilds (0 disables)")
-	flag.DurationVar(&c.watch, "watch", 0, "refresh interval for top mode (0 = print once)")
-	flag.BoolVar(&c.act, "act", false, "emit Kubernetes Events for zombie findings")
-	flag.Float64Var(&c.dollarRate, "dollar-rate", 0, "optional $/GPU-hour for waste costing")
-	flag.BoolVar(&c.wide, "wide", false, "show the evidence behind each verdict")
+	fs.StringVar(&c.podHostLabel, "pod-hostname-label", envOr("SQUIRE_POD_HOSTNAME_LABEL", "nodeset.slinky.slurm.net/pod-hostname"), "pod label carrying the Slurm node name")
+	fs.StringVar(&c.podMetricLabel, "pod-label", envOr("SQUIRE_POD_LABEL", "exported_pod"), "DCGM metric label carrying the pod name")
+	fs.StringVar(&c.serveAddr, "serve", "", "if set (e.g. :9410), expose /metrics instead of printing a table")
+	fs.DurationVar(&c.serveCache, "serve-cache", 30*time.Second, "minimum age of a cached build before /metrics rebuilds (0 disables)")
+	fs.DurationVar(&c.watch, "watch", 0, "refresh interval for top mode (0 = print once)")
+	fs.BoolVar(&c.act, "act", false, "emit Kubernetes Events for zombie findings")
+	fs.Float64Var(&c.dollarRate, "dollar-rate", 0, "optional $/GPU-hour for waste costing")
+	fs.BoolVar(&c.wide, "wide", false, "show the evidence behind each verdict")
 
 	// Threshold overrides. These are GLOBAL, per Squire instance — there is
 	// deliberately no per-job knob, so nobody can tune away an inconvenient
 	// verdict on their own job.
-	flag.DurationVar(&c.th.GraceCeiling, "grace", def.GraceCeiling, "warmup ceiling before a job can be judged")
-	flag.Float64Var(&c.th.BurstUtilPct, "burst-util", def.BurstUtilPct, "GPU util % counting as real work, ending warmup early")
-	flag.DurationVar(&c.th.IdleWindow, "idle-window", def.IdleWindow, "trailing window peak utilization is measured over")
-	flag.Float64Var(&c.th.IdleUtilPct, "idle-util", def.IdleUtilPct, "peak GPU util % below which the job is idle")
-	flag.DurationVar(&c.th.ZombieAfter, "zombie-after", def.ZombieAfter, "how long idle must persist before it is a zombie")
-	flag.Float64Var(&c.th.WorkedAvgPct, "worked-util", def.WorkedAvgPct, "avg GPU util % proving the job did real work earlier")
-	flag.Float64Var(&c.th.MemFloorFrac, "mem-floor", def.MemFloorFrac, "peak memory fraction below which a job is over-provisioned")
-	flag.Parse()
+	fs.DurationVar(&c.th.GraceCeiling, "grace", def.GraceCeiling, "warmup ceiling before a job can be judged")
+	fs.Float64Var(&c.th.BurstUtilPct, "burst-util", def.BurstUtilPct, "GPU util % counting as real work, ending warmup early")
+	fs.DurationVar(&c.th.IdleWindow, "idle-window", def.IdleWindow, "trailing window peak utilization is measured over")
+	fs.Float64Var(&c.th.IdleUtilPct, "idle-util", def.IdleUtilPct, "peak GPU util % below which the job is idle")
+	fs.DurationVar(&c.th.ZombieAfter, "zombie-after", def.ZombieAfter, "how long idle must persist before it is a zombie")
+	fs.Float64Var(&c.th.WorkedAvgPct, "worked-util", def.WorkedAvgPct, "avg GPU util % proving the job did real work earlier")
+	fs.Float64Var(&c.th.MemFloorFrac, "mem-floor", def.MemFloorFrac, "peak memory fraction below which a job is over-provisioned")
+	fs.Parse(args)
+
+	// flag stops at the first non-flag argument and silently ignores the rest,
+	// so a stray word would discard every flag after it. There are no
+	// positional arguments here, so anything left over is a mistake.
+	if fs.NArg() > 0 {
+		fmt.Fprintf(os.Stderr, "squire: unexpected argument %q\n", fs.Arg(0))
+		os.Exit(2)
+	}
 
 	c.th.BurstMemFrac = def.BurstMemFrac
 	c.th.UnderUtilPct = def.UnderUtilPct
 	c.th.UnderMemFrac = def.UnderMemFrac
 
-	// Slurm Rest API's JWT Token
-	c.slurmToken = os.Getenv("SLURM_JWT")
 	return c
 }
 
 func main() {
-	c := parseConfig()
+	c := parseConfig(os.Args[1:])
 
-	sc := slurmapi.NewClient(c.slurmURL, c.slurmVer, c.slurmToken)
+	sc := slurmapi.NewClient(c.URL, c.Version, c.Token)
 	pc := promapi.NewClient(c.promURL)
 	kc, err := kube.NewClient(c.kubeconfig, c.namespace, c.podHostLabel)
 	if err != nil {
