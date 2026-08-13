@@ -95,7 +95,7 @@ source ./env.sh
 (setup port forwarding for slurm rest API, prometheus and grafana, mint a new JWT Token)
 ```
 
-## Using GPU Squire
+## Using Squire
 
 ### Submit GPU workload
 #### submit a real GPU job
@@ -105,7 +105,7 @@ e.g. sbatch --gres=gpu:1 --job-name=zombie --wrap="sleep 3600"
 #### check queue and verify they are running
 squeue -o '%.8i %.10j %.8T %.10M %.10R %b'
 
-### Running GPU Squire
+### Running Squire
 #### Basic Usage
 ```
 lmsilva@PANDAMONIUM:~/squire$ go run ./cmd/squire
@@ -199,7 +199,40 @@ Events:
 lmsilva@PANDAMONIUM:~/squire$
 ```
 
-## Flags
+### Running squire-lint
+
+The check reads slurmrestd and nothing else. No DCGM, no Prometheus, no kubeconfig — so it runs on a login node, where the monitoring binary cannot.
+
+#### A clean queue
+```
+lmsilva@PANDAMONIUM:~/squire$ go run ./cmd/squire-lint
+checked 0 jobs, no findings
+```
+
+#### Findings
+```
+lmsilva@PANDAMONIUM:~/squire$ go run ./cmd/squire-lint
+JOBID  NAME  SEVERITY  RULE                         FINDING
+178    wrap  warn      no-time-limit                no time limit set - the scheduler cannot backfill around a job with no end
+179    wrap  note      time-limit-at-partition-max  time limit is exactly the partition maximum (24h0m0s), which is usually the default rather than an estimate - a tighter limit backfills sooner
+180    wrap  warn      cpu-only-on-gpu-node         requests no GPUs but holds gpu-0, which has 1 - those GPUs are only usable by another job if enough of the node is left free
+182    wrap  warn      dependency-doomed            pending on a dependency Slurm says can never be satisfied - it will queue forever. kill_invalid_depend in slurm.conf removes these automatically
+
+4 findings across 4 of 5 jobs (1 already finished)
+```
+
+#### Options
+```
+lmsilva@PANDAMONIUM:~/squire$ go run ./cmd/squire-lint -h
+Usage of squire-lint:
+  -slurm-api string
+        slurmrestd API version (default "v0.0.44")
+  -slurm-url string
+        slurmrestd base URL (default "http://localhost:6820")
+```
+
+
+## Squire Flags
 
 | Flag | Default | What it does |
 |---|---|---|
@@ -229,6 +262,10 @@ lmsilva@PANDAMONIUM:~/squire$
 Environment variables: `SLURM_JWT` for the slurmrestd token, and `SQUIRE_SLURM_URL`, `SQUIRE_SLURM_API`, `SQUIRE_PROM_URL`, `SQUIRE_NAMESPACE`, `SQUIRE_POD_HOSTNAME_LABEL`, `SQUIRE_POD_LABEL` as defaults for the flags above.
 
 In `--serve` mode, Squire honours the scrape timeout Prometheus sends and finishes just inside it, so a slow cluster gets an error you can read instead of a dropped connection.
+
+### squire-lint Flags
+
+`squire-lint` takes only the two flags above — `-slurm-url` and `-slurm-api` — and reads `SLURM_JWT` from the environment, never a flag, so the token stays out of `ps` output. It has none of `squire`'s Prometheus, Kubernetes, threshold or serve settings, because it reads none of those things.
 
 ## Exported metrics
 
