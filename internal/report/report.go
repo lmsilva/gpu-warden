@@ -18,6 +18,11 @@ import (
 // several queries and a typo does not fail: Prometheus answers an unknown
 // metric name with an empty vector and HTTP 200, so the mistake looks exactly
 // like "this cluster does not scrape that field".
+// firstWorkStep is the subquery resolution for the first-work measurement.
+// Finer than the scrape interval buys nothing, and a subquery costs one
+// evaluation per step across the whole window.
+const firstWorkStep = time.Minute
+
 const (
 	metricUtil   = "DCGM_FI_DEV_GPU_UTIL"            // percent, 0-100
 	metricFBUsed = "DCGM_FI_DEV_FB_USED"             // framebuffer used, MiB
@@ -72,6 +77,17 @@ type JobReport struct {
 	// this job holds. False means the numbers cover every GPU on the job's
 	// nodes, which is only equivalent when the job holds them all.
 	PerGPU bool
+
+	// LitGPUs counts this job's devices that ever crossed the burst
+	// threshold. HasLit false means it could not be read - a count of zero
+	// is a measurement and means something entirely different.
+	HasLit  bool
+	LitGPUs int
+
+	// FirstWorkAfter is the gap between the job starting and its first
+	// device doing work.
+	HasFirstWork   bool
+	FirstWorkAfter time.Duration
 
 	// Verdict is the two-axis judgement. Its zero value reads as
 	// "analyzing / unknown", so a report built before judging never looks
@@ -194,6 +210,8 @@ func (b *Builder) Build(ctx context.Context) ([]JobReport, error) {
 			HasData:       m.HasUtil,
 			PerGPU:        idx != nil,
 			EngineFaulted: faulted,
+			HasLit:        m.HasLit, LitGPUs: m.LitGPUs,
+			HasFirstWork: m.HasFirstWork, FirstWorkAfter: m.FirstWorkAfter,
 		}
 		if r.HasData {
 			r.WastedH = float64(gpus) * elapsed.Hours() * (1 - m.AvgUtil/100)
@@ -301,6 +319,27 @@ func (b *Builder) collect(ctx context.Context, targets []target, elapsed time.Du
 		m.AvgMemFrac = avgMem / capacity
 	}
 
+	// How many of the job's own devices ever did work, and how long it took
+	// the first one to start. Both are per-device questions that the averaged
+	// utilization above cannot answer.
+	if lit, ok, err := b.scalar(ctx, b.litQuery(targets, life, th.BurstUtilPct)); err != nil {
+		return m, err
+	} else if ok {
+		m.HasLit, m.LitGPUs = true, int(lit)
+	}
+	// Only meaningful with a real start_time to subtract from, and only when
+	// something was lit at all.
+	if hasStart && m.LitGPUs > 0 {
+		if ts, ok, err := b.scalar(ctx, b.firstWorkQuery(targets, life, th.BurstUtilPct)); err != nil {
+			return m, err
+		} else if ok {
+			since := time.Since(time.Unix(int64(ts), 0))
+			if d := elapsed - since; d >= 0 {
+				m.HasFirstWork, m.FirstWorkAfter = true, d
+			}
+		}
+	}
+
 	// Enrichment signals: refine confidence, never block a verdict. These are
 	// DCGM profiling fields. Plenty of installs do not scrape them, so an
 	// empty result is normal and simply leaves the flag false.
@@ -346,6 +385,42 @@ func (b *Builder) windowed(agg, metric string, targets []target, win time.Durati
 			agg, metric, selector(label, t), promDur(win)))
 	}
 	return fmt.Sprintf("%s(%s)", agg, strings.Join(parts, " or "))
+}
+
+// litQuery counts how many of the job's devices crossed thr at any point in
+// the window. Same per-target union as everything else, so it stays scoped to
+// the devices the job actually holds.
+//
+// The trailing "or vector(0)" is not decoration. count() over an empty vector
+// returns no series at all, so a job that lit nothing would be indistinguishable
+// from a job Squire could not measure - and those are opposite findings. With
+// the fallback, an unlit job returns a measured zero.
+func (b *Builder) litQuery(targets []target, win time.Duration, thr float64) string {
+	label := b.podLabel()
+	parts := make([]string, 0, len(targets))
+	for _, t := range targets {
+		parts = append(parts, fmt.Sprintf("max_over_time(%s{%s}[%s])",
+			metricUtil, selector(label, t), promDur(win)))
+	}
+	return fmt.Sprintf("count((%s) > %g) or vector(0)", strings.Join(parts, " or "), thr)
+}
+
+// firstWorkQuery returns the unix timestamp of the earliest sample where any
+// of the job's devices was above thr.
+//
+// timestamp() gives each qualifying sample's own time and min_over_time picks
+// the earliest, evaluated as a subquery because Squire has only an instant
+// query API. The step bounds the resolution: a job younger than one step
+// returns nothing, which reads as "cannot tell yet" rather than "started
+// instantly".
+func (b *Builder) firstWorkQuery(targets []target, win time.Duration, thr float64) string {
+	label := b.podLabel()
+	parts := make([]string, 0, len(targets))
+	for _, t := range targets {
+		parts = append(parts, fmt.Sprintf("%s{%s}", metricUtil, selector(label, t)))
+	}
+	return fmt.Sprintf("min_over_time((timestamp((%s) > %g))[%s:%s])",
+		strings.Join(parts, " or "), thr, promDur(win), promDur(firstWorkStep))
 }
 
 // capacityQuery is the one query with no window. Prometheus adds FB_USED and
