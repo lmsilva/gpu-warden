@@ -78,10 +78,18 @@ type Job struct {
 	GPUsRequested int  // 0 for a CPU-only job
 	Exclusive     bool // whole-node allocation requested
 
+	// ExclusiveMode is Slurm's word for how the job shares its nodes:
+	// "none" for --exclusive, "user" and "mcs" for the scoped variants.
+	// Empty means the node is shared normally.
+	ExclusiveMode string
+
 	// SharesGPU means the job holds a GPU through a shared resource rather
 	// than a whole device - Slurm's shard and mps types. Such a job reports
 	// no GPUs of its own, so without this it looks CPU-only on a GPU node.
 	SharesGPU bool
+
+	// CPUs is the CPU count the job was ALLOCATED. 0 means unknown.
+	CPUs int64
 
 	// MemoryMB is the memory the job was ALLOCATED, not what it asked for.
 	// Slurm hands a job that named no memory the node's entire supply, so the
@@ -111,6 +119,9 @@ type Node struct {
 	// MemoryMB is the node's total memory. 0 means unknown, which silences
 	// the rule that compares against it.
 	MemoryMB int64
+	// CPUs is what the scheduler can hand out from this node. 0 means
+	// unknown, same contract as MemoryMB.
+	CPUs int64
 }
 
 // Partition is what a partition allows.
@@ -150,6 +161,7 @@ func Check(j Job, c *Cluster) []Finding {
 		cpuOnlyOnGPUNode(j, *c, add)
 		exclusiveOverAllocation(j, *c, add)
 		memoryOverAllocation(j, *c, add)
+		cpuOverAllocation(j, *c, add)
 	}
 
 	sort.SliceStable(out, func(a, b int) bool { return out[a].Rule < out[b].Rule })
@@ -237,9 +249,20 @@ func cpuOnlyOnGPUNode(j Job, c Cluster, add func(Finding)) {
 // exclusiveOverAllocation: --exclusive takes the whole node, so a smaller GRES
 // request leaves the rest of its GPUs idle and unschedulable. Invisible in
 // every aggregate, because the node reads as fully allocated.
+//
+// --exclusive=user and =mcs strand the same GPUs from everyone outside that
+// scope. The message says which, because the fix differs: dropping the flag
+// entirely, or narrowing it.
 func exclusiveOverAllocation(j Job, c Cluster, add func(Finding)) {
 	if !j.Exclusive || j.GPUsRequested <= 0 {
 		return
+	}
+	scope := "no other job"
+	switch j.ExclusiveMode {
+	case "user":
+		scope = "no job from another user"
+	case "mcs":
+		scope = "no job outside this MCS group"
 	}
 	for _, name := range j.Nodes {
 		n, ok := c.Nodes[name]
@@ -247,8 +270,35 @@ func exclusiveOverAllocation(j Job, c Cluster, add func(Finding)) {
 			continue
 		}
 		add(Finding{JobID: j.ID, Rule: "exclusive-over-allocation", Severity: Warn,
-			Message: fmt.Sprintf("exclusive on %s (%d GPUs) but requested only %d - the other %d cannot be scheduled",
-				name, n.GPUs, j.GPUsRequested, n.GPUs-j.GPUsRequested)})
+			Message: fmt.Sprintf("exclusive on %s (%d GPUs) but requested only %d - %s can use the other %d",
+				name, n.GPUs, j.GPUsRequested, scope, n.GPUs-j.GPUsRequested)})
+		return
+	}
+}
+
+// cpuOverAllocation: the third way to strand a GPU without asking for it.
+// Taking every core on a node leaves nothing for another job to run on, so
+// the GPUs this one did not request cannot be scheduled either.
+//
+// Same shape as memoryOverAllocation and exclusiveOverAllocation, and the
+// three are deliberately separate rules rather than one "you took the node":
+// the fix differs. Memory wants --mem, cores want -c, exclusivity wants the
+// flag removed.
+func cpuOverAllocation(j Job, c Cluster, add func(Finding)) {
+	if j.GPUsRequested <= 0 || j.CPUs <= 0 {
+		return
+	}
+	for _, name := range j.Nodes {
+		n, ok := c.Nodes[name]
+		if !ok || n.CPUs <= 0 || n.GPUs <= j.GPUsRequested {
+			continue
+		}
+		if j.CPUs < n.CPUs {
+			continue
+		}
+		add(Finding{JobID: j.ID, Rule: "cpu-over-allocation", Severity: Warn,
+			Message: fmt.Sprintf("holds all %d CPUs on %s while requesting %d of its %d GPUs - nothing else can run there, so the other %d cannot be scheduled",
+				n.CPUs, name, j.GPUsRequested, n.GPUs, n.GPUs-j.GPUsRequested)})
 		return
 	}
 }
