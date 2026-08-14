@@ -416,3 +416,67 @@ func TestWindowClampedToJobAge(t *testing.T) {
 		}
 	}
 }
+
+// TestLitQueryShape pins the two things about the device count that are easy
+// to get wrong and impossible to notice from the output.
+//
+// The union stays per-target, so a job on two nodes does not pull in a
+// neighbour's device; and the query ends in "or vector(0)", without which
+// count() over an empty vector returns no series at all - making "lit
+// nothing" indistinguishable from "could not measure". Those are opposite
+// findings.
+func TestLitQueryShape(t *testing.T) {
+	b := &Builder{PodLabel: "exported_pod"}
+	targets := []target{
+		{Pod: "w-1", Indices: []string{"0", "1"}},
+		{Pod: "w-2", Indices: []string{"3"}},
+	}
+	q := b.litQuery(targets, 30*time.Minute, 15)
+
+	if !strings.HasSuffix(q, "or vector(0)") {
+		t.Errorf("the empty-vector fallback is missing: %s", q)
+	}
+	if !strings.Contains(q, "count(") {
+		t.Errorf("expected a count over devices: %s", q)
+	}
+	if !strings.Contains(q, `gpu=~"^(0|1)$"`) || !strings.Contains(q, `gpu=~"^(3)$"`) {
+		t.Errorf("device sets must stay per-pod: %s", q)
+	}
+	if strings.Contains(q, `gpu=~"^(0|1|3)$"`) {
+		t.Errorf("a merged device set would pull in another job's GPU: %s", q)
+	}
+	if !strings.Contains(q, "> 15") {
+		t.Errorf("the burst threshold must reach the query: %s", q)
+	}
+}
+
+// TestFirstWorkQueryShape: the subquery step bounds the resolution, and its
+// absence would make the query invalid rather than merely imprecise.
+func TestFirstWorkQueryShape(t *testing.T) {
+	b := &Builder{PodLabel: "exported_pod"}
+	q := b.firstWorkQuery([]target{{Pod: "w-1", Indices: []string{"0"}}}, time.Hour, 15)
+
+	if !strings.Contains(q, "min_over_time(") || !strings.Contains(q, "timestamp(") {
+		t.Errorf("expected the earliest qualifying sample's timestamp: %s", q)
+	}
+	if !strings.Contains(q, "[3600s:60s]") {
+		t.Errorf("expected a subquery over the run with a 1m step: %s", q)
+	}
+}
+
+// TestUnmeasuredLitStaysUnset is the report-level half of the contract the
+// cross engine depends on: no series means HasLit false, never zero.
+func TestUnmeasuredLitStaysUnset(t *testing.T) {
+	b := &Builder{PodLabel: "exported_pod", Prom: fakeProm{byGPU: map[string]gpu{}}}
+	m, err := b.collect(context.Background(), []target{{Pod: "nobody"}},
+		time.Hour, true, verdict.DefaultThresholds(), true)
+	if err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	if m.HasLit {
+		t.Errorf("a device count that returned nothing must leave HasLit false, got %d", m.LitGPUs)
+	}
+	if m.HasFirstWork {
+		t.Errorf("first-work must stay unset when nothing was lit")
+	}
+}
