@@ -60,6 +60,8 @@ func toLintJob(j slurmapi.Job) lint.Job {
 		State:         j.BaseState(),
 		GPUsRequested: slurmapi.GPUCount(j),
 		Exclusive:     j.Exclusive(),
+		ExclusiveMode: j.ExclusiveMode(),
+		CPUs:          tresCount(j.TresAlloc, "cpu"),
 		StateReason:   j.StateReason,
 		MemoryMB:      tresMemMB(j.TresAlloc),
 		SharesGPU:     sharesGPU(j.TresAlloc, j.TresPerNode),
@@ -86,7 +88,8 @@ func toCluster(nodes []slurmapi.Node, parts []slurmapi.Partition) *lint.Cluster 
 	}
 	for _, n := range nodes {
 		c.Nodes[n.Name] = lint.Node{
-			Name: n.Name, GPUs: gresGPUs(n.Gres), MemoryMB: n.RealMemory.Number,
+			Name: n.Name, GPUs: gresGPUs(n.Gres),
+			MemoryMB: n.RealMemory.Number, CPUs: n.SchedulableCPUs(),
 		}
 	}
 	for _, p := range parts {
@@ -125,6 +128,23 @@ func gresGPUs(gres string) int {
 		}
 	}
 	return total
+}
+
+// tresCount pulls a plain count out of a TRES string, e.g. cpu=2 from
+// "cpu=2,mem=1G,node=1". Counts carry no unit suffix, unlike memory.
+func tresCount(tres, name string) int64 {
+	for _, part := range strings.Split(tres, ",") {
+		k, v, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if !ok || k != name {
+			continue
+		}
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return 0
+		}
+		return n
+	}
+	return 0
 }
 
 // tresMemMB pulls the memory out of a TRES string such as

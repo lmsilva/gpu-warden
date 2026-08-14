@@ -80,14 +80,24 @@ type Job struct {
 	StateReason string `json:"state_reason"`
 }
 
-// Exclusive reports whether the job asked for whole-node allocation.
-func (j Job) Exclusive() bool {
+// Exclusive reports whether the job asked for whole-node allocation, in any
+// of its three forms.
+func (j Job) Exclusive() bool { return j.ExclusiveMode() != "" }
+
+// ExclusiveMode returns Slurm's word for the exclusivity the job asked for -
+// "none" for --exclusive, "user" or "mcs" for the scoped variants - or an
+// empty string when the node is shared normally.
+//
+// All three are measured values, not guesses: --exclusive arrives as "none",
+// --exclusive=user as "user", --exclusive=mcs as "mcs".
+func (j Job) ExclusiveMode() string {
 	for _, s := range j.Shared {
-		if s == "none" {
-			return true
+		switch s {
+		case "none", "user", "mcs":
+			return s
 		}
 	}
-	return false
+	return ""
 }
 
 // BaseState is the job's state without the flags Slurm appends after it.
@@ -111,8 +121,25 @@ type Node struct {
 
 	// RealMemory is the node's memory in MB. Declared as a NoVal because
 	// slurmrestd sends it bare here but wraps the neighbouring memory fields,
-	// and which is which has changed between versions.
+	// and which has changed between versions.
 	RealMemory NoVal `json:"real_memory"`
+
+	// EffectiveCPUs is what the scheduler will hand out, which is not always
+	// what the hardware has: a node can be configured to offer fewer. Cpus is
+	// the hardware count, kept as the fallback when the effective figure is
+	// absent.
+	EffectiveCPUs NoVal `json:"effective_cpus"`
+	Cpus          NoVal `json:"cpus"`
+}
+
+// SchedulableCPUs is the CPU count a job can be allocated from this node.
+// Prefers the effective figure and falls back to the hardware count, so a
+// node reporting only one of the two is still usable rather than reading zero.
+func (n Node) SchedulableCPUs() int64 {
+	if n.EffectiveCPUs.Set {
+		return n.EffectiveCPUs.Number
+	}
+	return n.Cpus.Number
 }
 
 type nodesResponse struct {

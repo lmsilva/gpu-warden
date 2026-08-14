@@ -88,17 +88,51 @@ func TestStateReachesTheEngine(t *testing.T) {
 }
 
 // TestExclusiveFromShared pins the field that is not called what you expect:
-// there is no "exclusive" on the job-info schema, and --exclusive renders as
-// shared="none".
+// there is no "exclusive" on the job-info schema, and the three forms of
+// exclusivity arrive as shared="none", "user" and "mcs".
+//
+// All three strand the GPUs the job did not request. They differ only in who
+// is excluded, which is why the mode travels with the finding.
 func TestExclusiveFromShared(t *testing.T) {
-	if !(slurmapi.Job{Shared: []string{"none"}}).Exclusive() {
-		t.Errorf(`shared "none" means exclusive`)
+	cases := []struct {
+		shared []string
+		mode   string
+	}{
+		{[]string{"none"}, "none"},
+		{[]string{"user"}, "user"},
+		{[]string{"mcs"}, "mcs"},
+		{[]string{"oversubscribe"}, ""},
+		{nil, ""},
 	}
-	if (slurmapi.Job{Shared: []string{"user"}}).Exclusive() {
-		t.Errorf(`shared "user" is not exclusive`)
+	for _, c := range cases {
+		j := slurmapi.Job{Shared: c.shared}
+		if got := j.ExclusiveMode(); got != c.mode {
+			t.Errorf("shared %v: mode %q, want %q", c.shared, got, c.mode)
+		}
+		if got := j.Exclusive(); got != (c.mode != "") {
+			t.Errorf("shared %v: Exclusive() = %v", c.shared, got)
+		}
 	}
-	if (slurmapi.Job{}).Exclusive() {
-		t.Errorf("no shared field is not exclusive")
+}
+
+// TestTresCount covers the plain-count parser. Counts carry no unit suffix,
+// which is the whole reason it is not tresMemMB.
+func TestTresCount(t *testing.T) {
+	cases := []struct {
+		tres, name string
+		want       int64
+	}{
+		{"cpu=2,mem=1G,node=1,billing=2", "cpu", 2},
+		{"cpu=48,mem=191168M,node=1", "cpu", 48},
+		{"cpu=2,mem=1G", "node", 0},
+		{"", "cpu", 0},
+		{"cpu=,mem=1G", "cpu", 0},
+		{"cpu=many", "cpu", 0},
+	}
+	for _, c := range cases {
+		if got := tresCount(c.tres, c.name); got != c.want {
+			t.Errorf("tresCount(%q, %q) = %d, want %d", c.tres, c.name, got, c.want)
+		}
 	}
 }
 
