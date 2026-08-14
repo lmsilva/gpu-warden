@@ -139,6 +139,27 @@ type Metrics struct {
 	PeakMemMiB  float64 // for display
 	CapacityMiB float64 // for display
 
+	// LitGPUs counts the job's devices that crossed the burst threshold at
+	// any point in the run. It answers a different question from AvgUtil,
+	// which averages across devices and so cannot tell four busy cards from
+	// eight half-busy ones.
+	//
+	// HasLit false means the count could not be read. A count of zero is a
+	// measurement - the job lit nothing - and the two must never be
+	// confused, which is why an empty Prometheus result is not zero.
+	HasLit  bool
+	LitGPUs int
+
+	// FirstWorkAfter is how long after the job started before any device
+	// first crossed the burst threshold: container pulls, dataset staging,
+	// initialization. Startup idleness is not waste idleness, and nothing
+	// else Squire measures separates them.
+	//
+	// HasFirstWork false covers both "never worked" and "too young to tell",
+	// which the caller distinguishes using LitGPUs.
+	HasFirstWork   bool
+	FirstWorkAfter time.Duration
+
 	// Enrichment signals refine confidence and never change a finding. Each
 	// needs DCGM profiling metrics, which plenty of clusters do not scrape,
 	// so a verdict that depended on them would mean different things on
