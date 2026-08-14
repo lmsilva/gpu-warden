@@ -12,8 +12,8 @@ import (
 func testCluster() *Cluster {
 	return &Cluster{
 		Nodes: map[string]Node{
-			"compute-042": {Name: "compute-042", GPUs: 4, MemoryMB: 191168},
-			"node1":       {Name: "node1", GPUs: 0, MemoryMB: 15617},
+			"compute-042": {Name: "compute-042", GPUs: 4, MemoryMB: 191168, CPUs: 48},
+			"node1":       {Name: "node1", GPUs: 0, MemoryMB: 15617, CPUs: 4},
 		},
 		Partitions: map[string]Partition{
 			"batch":   {Name: "batch", MaxTime: 24 * time.Hour, HasMaxTime: true},
@@ -115,6 +115,25 @@ func TestRules(t *testing.T) {
 			job: Job{ID: 13, Partition: "batch", State: "RUNNING", Nodes: []string{"compute-042"},
 				GPUsRequested: 1, MemoryMB: 16384, TimeLimit: time.Hour, HasTimeLimit: true},
 			want: nil,
+		},
+		{
+			name: "holds every core on a node whose GPUs it only partly requested",
+			job: Job{ID: 15, Partition: "batch", State: "RUNNING", Nodes: []string{"compute-042"},
+				GPUsRequested: 1, CPUs: 48, TimeLimit: time.Hour, HasTimeLimit: true},
+			want: []string{"cpu-over-allocation"},
+		},
+		{
+			name: "a modest slice of cores strands nothing",
+			job: Job{ID: 16, Partition: "batch", State: "RUNNING", Nodes: []string{"compute-042"},
+				GPUsRequested: 1, CPUs: 4, TimeLimit: time.Hour, HasTimeLimit: true},
+			want: nil,
+		},
+		{
+			name: "exclusive scoped to one user still strands the rest",
+			job: Job{ID: 17, Partition: "batch", State: "RUNNING", Nodes: []string{"compute-042"},
+				GPUsRequested: 1, Exclusive: true, ExclusiveMode: "user",
+				TimeLimit: time.Hour, HasTimeLimit: true},
+			want: []string{"exclusive-over-allocation"},
 		},
 		{
 			name: "a partition with no ceiling cannot be sat at",
@@ -231,6 +250,18 @@ func TestUnknownMemoryIsSilent(t *testing.T) {
 		GPUsRequested: 1, MemoryMB: 191168, TimeLimit: time.Hour, HasTimeLimit: true}, unknownNode)
 	if has(noNodeMem, "memory-over-allocation") {
 		t.Errorf("unknown node memory must produce nothing: %v", rules(noNodeMem))
+	}
+	// Same contract one resource over: an unread CPU count is 0, and 0 must
+	// not satisfy "holds every core".
+	noCPU := Check(Job{ID: 3, Partition: "batch", State: "RUNNING", Nodes: []string{"compute-042"},
+		GPUsRequested: 1, TimeLimit: time.Hour, HasTimeLimit: true}, c)
+	if has(noCPU, "cpu-over-allocation") {
+		t.Errorf("unknown job CPUs must produce nothing: %v", rules(noCPU))
+	}
+	if has(Check(Job{ID: 4, Partition: "batch", State: "RUNNING", Nodes: []string{"compute-042"},
+		GPUsRequested: 1, CPUs: 48, TimeLimit: time.Hour, HasTimeLimit: true}, unknownNode),
+		"cpu-over-allocation") {
+		t.Errorf("unknown node CPUs must produce nothing")
 	}
 }
 
