@@ -60,6 +60,15 @@ type Job struct {
 // the platform team's problem rather than the job owner's.
 const SlowStartAfter = 15 * time.Minute
 
+// plural renders "1 GPU" and "2 GPUs". Findings name a person's job, and a
+// message that cannot count reads as one nobody proofread.
+func plural(n int) string {
+	if n == 1 {
+		return "GPU"
+	}
+	return "GPUs"
+}
+
 // Check returns the cross-source findings for one job, ordered by rule name so
 // output is stable between runs.
 //
@@ -99,8 +108,8 @@ func neverTouched(j Job, add func(lint.Finding)) {
 		return
 	}
 	add(lint.Finding{JobID: j.ID, Rule: "gpu-requested-never-touched", Severity: lint.Warn,
-		Message: fmt.Sprintf("holds %d GPU(s) and none has done any work in %s - the job may not be able to see them at all",
-			j.GPUsRequested, j.Elapsed.Round(time.Minute))})
+		Message: fmt.Sprintf("holds %d %s and none has done any work in %s - the job may not be able to see them at all",
+			j.GPUsRequested, plural(j.GPUsRequested), j.Elapsed.Round(time.Minute))})
 }
 
 // partiallyUsed: the job holds more devices than it has ever lit. This is the
@@ -111,8 +120,9 @@ func partiallyUsed(j Job, add func(lint.Finding)) {
 		return
 	}
 	add(lint.Finding{JobID: j.ID, Rule: "partially-used-allocation", Severity: lint.Warn,
-		Message: fmt.Sprintf("holds %d GPUs but only %d has done any work - the other %d are allocated and idle",
-			j.GPUsRequested, j.LitGPUs, j.GPUsRequested-j.LitGPUs)})
+		Message: fmt.Sprintf("holds %d GPUs but only %d has done any work - the other %d %s allocated and idle",
+			j.GPUsRequested, j.LitGPUs, j.GPUsRequested-j.LitGPUs,
+			map[bool]string{true: "is", false: "are"}[j.GPUsRequested-j.LitGPUs == 1])})
 }
 
 // slowFirstWork: the devices were held for a long time before any of them
@@ -124,6 +134,6 @@ func slowFirstWork(j Job, add func(lint.Finding)) {
 		return
 	}
 	add(lint.Finding{JobID: j.ID, Rule: "slow-first-gpu-work", Severity: lint.Note,
-		Message: fmt.Sprintf("%s passed before any GPU did work - startup, staging or initialization held %d device(s) idle",
-			j.FirstWorkAfter.Round(time.Minute), j.GPUsRequested)})
+		Message: fmt.Sprintf("%s passed before any GPU did work - startup, staging or initialization held %d %s idle",
+			j.FirstWorkAfter.Round(time.Minute), j.GPUsRequested, plural(j.GPUsRequested))})
 }
