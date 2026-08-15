@@ -15,6 +15,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/lmsilva/squire/internal/cross"
 	"github.com/lmsilva/squire/internal/expose"
 	"github.com/lmsilva/squire/internal/kube"
 	"github.com/lmsilva/squire/internal/promapi"
@@ -236,6 +237,7 @@ func main() {
 				fmt.Printf("\n=== %s ===\n", time.Now().Format("15:04:05"))
 			}
 			printTable(os.Stdout, reports, c)
+			printFindings(os.Stdout, reports, c.th)
 		}
 
 		if c.watch == 0 {
@@ -321,6 +323,50 @@ func runCycle(ctx context.Context, b *report.Builder, kc *kube.Client, c config,
 
 // printTable renders reports as a top-style table: one column per verdict axis,
 // and (with --wide) the evidence behind them.
+// toCrossJob adapts a finished report into the cross-source engine's input.
+// The grace period travels with it so the engine can stay silent on a job
+// that has not yet had the chance to waste anything - the same ceiling the
+// activity verdict uses, from the same thresholds.
+func toCrossJob(r report.JobReport, grace time.Duration) cross.Job {
+	return cross.Job{
+		ID: r.Job.JobID, Name: r.Job.Name, User: r.Job.Owner(),
+		GPUsRequested: r.GPUs,
+		Elapsed:       r.Elapsed,
+		Grace:         grace,
+		PerGPU:        r.PerGPU,
+		HasLit:        r.HasLit, LitGPUs: r.LitGPUs,
+		HasFirstWork: r.HasFirstWork, FirstWorkAfter: r.FirstWorkAfter,
+	}
+}
+
+// printFindings writes the cross-source findings under the verdict table.
+//
+// A separate block rather than more columns: the table answers "what is every
+// job doing", one row each, and findings are exceptions that most jobs do not
+// have. Widening every row for something few of them carry would cost the
+// table its shape. The columns match squire-lint's, so a reader who has seen
+// one recognises the other.
+func printFindings(out io.Writer, reports []report.JobReport, th verdict.Thresholds) {
+	jobs := make([]cross.Job, 0, len(reports))
+	names := make(map[int]string, len(reports))
+	for _, r := range reports {
+		jobs = append(jobs, toCrossJob(r, th.GraceCeiling))
+		names[r.Job.JobID] = r.Job.Name
+	}
+	findings := cross.CheckAll(jobs)
+	if len(findings) == 0 {
+		return
+	}
+	fmt.Fprintln(out)
+	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "JOBID\tNAME\tSEVERITY\tRULE\tFINDING")
+	for _, f := range findings {
+		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\n",
+			f.JobID, names[f.JobID], f.Severity, f.Rule, f.Message)
+	}
+	w.Flush()
+}
+
 func printTable(out io.Writer, reports []report.JobReport, c config) {
 	// tabwriter buffers: nothing prints until Flush.
 	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
