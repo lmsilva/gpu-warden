@@ -1,11 +1,30 @@
 # squire
-Finds GPUs that Slurm has allocated but are not actively used. Joins slurmrestd, DCGM, and Kubernetes pod identity into per-job efficiency metrics and Events.
+
+Finds GPUs that Slurm has allocated but nobody is using. Joins slurmrestd, DCGM and Kubernetes pod identity into per-job efficiency metrics and Events.
+
+Two binaries. **`squire`** measures what GPUs are doing and needs the telemetry stack. **`squire-lint`** checks what jobs asked for and needs one slurmrestd URL — no DCGM, no Prometheus, no kubeconfig, so it runs on a login node where the other one cannot.
+
+---
+
+## What Squire reports
+
+Squire answers three questions, and keeping them apart is what keeps the answers honest.
+
+| Report | Reads | Answers |
+|---|---|---|
+| **Verdicts** | DCGM telemetry, per device | What is this GPU doing? |
+| **Job checks** | slurmrestd alone | What did this job ask for, and can the cluster give it? |
+| **Allocation checks** | both | Is the job using everything it was given? |
+
+`squire-lint` runs the job checks. `squire` produces the verdicts and the allocation checks.
+
+A verdict describes a device. A check produces a *finding* — the word the output uses — which names somebody's job and is read by their colleagues. That is why the bar for producing one is higher than for reporting a number.
 
 ---
 
 ## The verdict model
 
-Squire produces **two independent verdicts per job**, because "is this job wasting a GPU" is really two different questions.
+Squire produces **two independent verdicts per job**, because "is this job wasting a GPU" turns out to be two separate questions.
 
 **Activity — what the GPU is doing.** A lifecycle, not a flag:
 
@@ -16,7 +35,7 @@ Squire produces **two independent verdicts per job**, because "is this job wasti
 | `idle` | Sustained near-zero work past warmup. A measurement, not an accusation. |
 | `zombie` | Idle **plus** evidence it isn't coming back (long duration, or the crash signature). |
 
-**Sizing — whether the job asked for the right amount of GPU.** Judged only for `healthy` jobs, since an idle job's waste is already reported by Activity:
+**Sizing — whether the card is bigger than the job needed.** This axis is about one device's capacity, not how many devices the job holds: it compares peak memory against the card's total and asks whether the job worked that card hard. Judged only for `healthy` jobs, since an idle job's waste is already reported by Activity:
 
 | State | Meaning |
 |---|---|
@@ -29,9 +48,81 @@ Every verdict carries a **confidence** (`high` / `medium` / `low`) and the evide
 **Idle → Zombie promotion.** Idle becomes Zombie when either is true:
 
 - **Duration** — idle has persisted past `--zombie-after` (default 2h).
-- **The crash signature** — the job's lifetime average proves it did real work, but its recent peak is flat. The training died; the allocation lived on.
+- **The crash signature** — the job's lifetime average proves it did real work, but its recent peak is flat. e.g. The training died; the allocation lived on.
 
 **Why "no burst ever" is not a detection gap.** Warmup ends at a fixed ceiling *or* the first real burst, whichever comes first. The burst only ever ends warmup *early*, for honest jobs. A true zombie never bursts, so warmup ends at the ceiling and the idle window then counts against it. The zombie convicts itself by never bursting.
+
+---
+
+## Job checks: what a job asked for
+
+`squire-lint` reads three slurmrestd endpoints — jobs, nodes, partitions — and writes nothing anywhere. It needs no telemetry stack at all, which is the point: it works on a cluster that has installed none of it.
+
+| Rule | Severity | Fires when |
+|---|---|---|
+| `dependency-doomed` | warn | Slurm's own `state_reason` is `DependencyNeverSatisfied` |
+| `no-time-limit` | warn | No wall-clock limit, or an unlimited one — the scheduler cannot backfill around either |
+| `time-limit-at-partition-max` | note | The limit is exactly the partition ceiling, usually the default rather than an estimate |
+| `cpu-only-on-gpu-node` | warn | A job holding no GPUs occupies a node that has them |
+| `exclusive-over-allocation` | warn | `--exclusive` with a GRES request smaller than the node |
+| `memory-over-allocation` | warn | The job holds all of a node's memory while requesting only some of its GPUs |
+| `cpu-over-allocation` | warn | The job holds all of a node's cores while requesting only some of its GPUs |
+
+`warn` is worth fixing. `note` is worth knowing. Two levels rather than five, because more invites arguing about the grade instead of the finding.
+
+**Three rules cover the same damage through different resources.** Exclusivity, memory and cores each leave GPUs allocated and unschedulable, and each is invisible in every aggregate because the node reads as fully allocated. They are separate rules because the remedy differs: drop or narrow `--exclusive`, pass `--mem`, pass `-c`. One combined rule would have to name all three fixes and would be right about one.
+
+**Exclusivity has three forms** — `--exclusive`, `--exclusive=user`, `--exclusive=mcs` — and all three strand the same GPUs. The finding says who is shut out, because that decides which remedy applies.
+
+**Which jobs are checked.** Pending, running, suspended and configuring. Slurm keeps finished jobs in its response for `MinJobAge`, and a finished job cannot be told to set a time limit or accused of holding a node it already gave back. The summary line reports how many were skipped.
+
+**Exit codes**, because anything scripting this depends on them:
+
+| Code | Meaning |
+|---|---|
+| 0 | Checked, no findings |
+| 1 | Findings |
+| 2 | The job list could not be read |
+
+A run that reads jobs but not nodes still checks what it can and exits 0 or 1, saying so in the output. `2` means the check did not happen.
+
+**Scope.** It checks submitted jobs, running ones included. It is not a pre-submission hook.
+
+---
+
+## Allocation checks: when a job holds more than it uses
+
+These need both halves. *"Requested eight GPUs"* is a configuration fact that says nothing about waste. *"Two devices were busy"* is a measurement that says nothing about intent. Together they name a specific job holding specific hardware it never used.
+
+| Rule | Severity | Fires when |
+|---|---|---|
+| `partially-used-allocation` | warn | The job holds more GPUs than it has ever lit |
+| `gpu-requested-never-touched` | warn | The job holds GPUs and none has ever done work |
+| `slow-first-gpu-work` | note | A long gap between the job starting and its first device working |
+
+Measured on a 4-GPU node, two jobs each holding two devices:
+
+```
+JOBID  NAME  USER       GPUS  ELAPSED  AVG%  PEAK%  GPU-MEM       WASTED-GPU-H  ACTIVITY        SIZING            LIT  FIRST-WORK
+192    wrap  uid:50000  2     26m0s    49    100    0.6/15G (4%)  0.4           healthy:medium  over-provisioned  1    58s
+193    wrap  uid:50000  2     26m0s    37    100    0.6/15G (4%)  0.5           healthy:medium  over-provisioned  2    16m51s
+
+JOBID  NAME  SEVERITY  RULE                       FINDING
+192    wrap  warn      partially-used-allocation  holds 2 GPUs but only 1 has done any work - the other 1 is allocated and idle
+193    wrap  note      slow-first-gpu-work        17m passed before any GPU did work - startup, staging or initialization held 2 GPUs idle
+```
+
+Both jobs read `healthy:medium` and `over-provisioned`. Looking only at utilization, they are two ordinary jobs. The findings underneath say one has held an idle GPU for twenty-six minutes and the other held two for seventeen — and no aggregate anywhere would show it, because the node reads as fully allocated the whole time.
+
+**`LIT` counts devices that ever crossed the burst threshold, and answers a question an average cannot.** Averaged across devices, four busy cards and eight half-busy ones read the same.
+
+**`FIRST-WORK` separates startup idleness from waste idleness.** Container pulls, dataset staging and kernel compilation are not the same as an abandoned allocation, and nothing else Squire measures tells them apart.
+
+**When these stay silent**, which matters as much as when they fire:
+
+- **Inside the grace period.** A job that has just started has not had the chance to waste anything.
+- **Without per-device telemetry.** If the numbers cover every GPU on the job's nodes rather than the ones it holds, a neighbour's work could exonerate it or a neighbour's idleness could condemn it. Either way the finding would name the wrong person.
+- **Without the measurement.** An unread device count is never treated as zero. In `--wide` a dash means "not measured"; `0` means "measured, and nothing was lit".
 
 ---
 
@@ -41,7 +132,9 @@ Telemetry is scoped to the **exact GPU devices a job holds**, read from Slurm's 
 
 Where Slurm does not publish `gres_detail`, Squire falls back to node-wide scoping and **marks the row with `*`** plus a footnote. It never quietly presents node-wide numbers as if they were the job's own.
 
-Note: Measured on a shared 4-GPU node: two jobs, one pod, one holding GPUs 0-1 and the other GPUs 2-3. DCGM read 0% on the first pair and 100% on the second at the same moment, and Squire reported each job only its own. Scoped by pod alone, both jobs would have read 100%.
+Measured on a shared 4-GPU node: two jobs, one pod, one holding GPUs 0-1 and the other GPUs 2-3. DCGM read 0% on the first pair and 100% on the second at the same moment, and Squire reported each job only its own. Scoped by pod alone, both jobs would have read 100%.
+
+Slurm counts device minor numbers and DCGM counts NVML indices, and nothing guarantees those agree. Joined by UUID on that node they did, card for card.
 
 ---
 
@@ -51,7 +144,7 @@ Note: Measured on a shared 4-GPU node: two jobs, one pod, one holding GPUs 0-1 a
 
 | Signal | DCGM field | Unit | Why Squire reads it |
 |---|---|---|---|
-| GPU utilization | `DCGM_FI_DEV_GPU_UTIL` | percent, 0–100 | The number everyone watches — and a **time-based occupancy flag, not a work measurement**. One tiny kernel on one of a hundred-plus compute units reads as 100%.  |
+| GPU utilization | `DCGM_FI_DEV_GPU_UTIL` | percent, 0–100 | The number everyone watches — and a **time-based occupancy flag, not a work measurement**. One tiny kernel on one of a hundred-plus compute units reads as 100%. |
 | Framebuffer used | `DCGM_FI_DEV_FB_USED` | **absolute MiB** | "Framebuffer" is NVIDIA's term for the memory on the card. This is the sizing signal — but an absolute number is meaningless without the card's size. |
 | Framebuffer free | `DCGM_FI_DEV_FB_FREE` | **absolute MiB** | Added to `FB_USED` to derive the card's total memory. This is how Squire learns it is looking at a 15 GiB card **without being told what hardware it runs on** — which is why the over-provisioned verdict is phrased as an observation, not a hardware recommendation. |
 | Engine activity | `DCGM_FI_PROF_GR_ENGINE_ACTIVE` | **ratio, 0–1** | Was the compute engine busy at all. The broad signal, and a more precise answer to the occupancy question than utilization. **Optional.** |
@@ -75,8 +168,8 @@ Defaults are the product; configuration is an escape hatch. Every default leans 
 
 | Flag | Default | Governs |
 |---|---|---|
-| `--grace` | 15m | Warmup ceiling: covers data loading, checkpoint restore, kernel compile. |
-| `--burst-util` | 15 | Utilization (%) counting as real work, ending warmup early. |
+| `--grace` | 15m | Warmup ceiling: covers data loading, checkpoint restore, kernel compile. Also the age below which no allocation check will report anything. |
+| `--burst-util` | 15 | Utilization (%) counting as real work, ending warmup early. Also the bar a device must cross to count as lit. |
 | `--idle-window` | 30m | Trailing window that peak utilization is measured over. |
 | `--idle-util` | 5 | Peak utilization (%) below which the GPU is doing nothing. |
 | `--zombie-after` | 2h | How long idle must persist before it is a zombie. |
@@ -116,23 +209,22 @@ lmsilva@PANDAMONIUM:~/squire$
 ```
 
 #### Show the evidence
+
+`--wide` adds the reasoning behind each verdict, plus the two measurements the allocation checks rest on.
+
 ```
 lmsilva@PANDAMONIUM:~/squire$ go run ./cmd/squire --wide
-JOBID  NAME     USER       GPUS  ELAPSED  AVG%  PEAK%  GPU-MEM        WASTED-GPU-H  ACTIVITY        SIZING       WHY
-129    tinygpt  uid:50000  1     2m0s     100   100    2.9/15G (20%)  0.0           healthy:medium  right-sized  GPU util peak 100% over 30m0s; tensor cores near idle (0%) - util may not mean training throughput
-130    zombie   uid:50000  1     2m0s     0     0      0.0/15G (0%)   0.0           analyzing       -            warming up (2m0s of 15m0s, no real burst yet)
+JOBID  NAME  USER       GPUS  ELAPSED  AVG%  PEAK%  GPU-MEM       WASTED-GPU-H  ACTIVITY        SIZING            LIT  FIRST-WORK  WHY
+192    wrap  uid:50000  2     26m0s    49    100    0.6/15G (4%)  0.4           healthy:medium  over-provisioned  1    58s         GPU util peak 100% over 26m0s; tensor cores near idle (0%) - util may not mean training throughput; reserved a full GPU but peak memory only 0.6/14.7 GiB (4%) - never needed a card this large
+193    wrap  uid:50000  2     26m0s    37    100    0.6/15G (4%)  0.5           healthy:medium  over-provisioned  2    16m51s      GPU util peak 100% over 26m0s; tensor cores near idle (0%) - util may not mean training throughput; reserved a full GPU but peak memory only 0.6/14.7 GiB (4%) - never needed a card this large
+
+JOBID  NAME  SEVERITY  RULE                       FINDING
+192    wrap  warn      partially-used-allocation  holds 2 GPUs but only 1 has done any work - the other 1 is allocated and idle
+193    wrap  note      slow-first-gpu-work        17m passed before any GPU did work - startup, staging or initialization held 2 GPUs idle
 lmsilva@PANDAMONIUM:~/squire$
 ```
 
-#### Watch it and estimate wasted dollar amount
-```
-lmsilva@PANDAMONIUM:~/squire$ go run ./cmd/squire --watch 30s --dollar-rate 0.53 -wide
-
-=== 10:26:09 ===
-JOBID  NAME     USER       GPUS  ELAPSED  AVG%  PEAK%  GPU-MEM        WASTED-GPU-H  ACTIVITY        SIZING       WHY
-129    tinygpt  uid:50000  1     3m0s     99    100    2.9/15G (20%)  0.0 ($0.00)   healthy:medium  right-sized  GPU util peak 100% over 30m0s; tensor cores near idle (0%) - util may not mean training throughput
-130    zombie   uid:50000  1     2m0s     0     0      0.0/15G (0%)   0.0 ($0.02)   analyzing       -            warming up (2m0s of 15m0s, no real burst yet)
-```
+Nothing prints below the table when there are no findings.
 
 #### Serve Prometheus metrics endpoint
 
@@ -140,33 +232,21 @@ Do note anyone who can reach this port gets the metrics, and they include userna
 Responses are cached for `--serve-cache` (30s by default). Keep it under your Prometheus scrape interval, or you'll scrape the same numbers twice. `--serve-cache 0` turns it off and rebuilds on every scrape.
 
 ```
-lmsilva@PANDAMONIUM:~/squire$ go run ./cmd/squire --serve :9410 & 
-serving /metrics on :9410 
-lmsilva@PANDAMONIUM:~/squire$ curl -s http://localhost:9410/metrics | grep -E 'squire_job_(activity|sizing)'
-# HELP squire_job_activity Job activity verdict: 1 on the state currently held (analyzing, healthy, idle, zombie).
-# TYPE squire_job_activity gauge
-squire_job_activity{job_id="129",user="uid:50000",partition="all",state="analyzing"} 0
-squire_job_activity{job_id="129",user="uid:50000",partition="all",state="healthy"} 1
-squire_job_activity{job_id="129",user="uid:50000",partition="all",state="idle"} 0
-squire_job_activity{job_id="129",user="uid:50000",partition="all",state="zombie"} 0
-squire_job_activity{job_id="130",user="uid:50000",partition="all",state="analyzing"} 1
-squire_job_activity{job_id="130",user="uid:50000",partition="all",state="healthy"} 0
-squire_job_activity{job_id="130",user="uid:50000",partition="all",state="idle"} 0
-squire_job_activity{job_id="130",user="uid:50000",partition="all",state="zombie"} 0
-# HELP squire_job_sizing Job sizing verdict: 1 on the state currently held (unknown, right_sized, over_provisioned, under_provisioned).
-# TYPE squire_job_sizing gauge
-squire_job_sizing{job_id="129",user="uid:50000",partition="all",state="unknown"} 0
-squire_job_sizing{job_id="129",user="uid:50000",partition="all",state="right_sized"} 1
-squire_job_sizing{job_id="129",user="uid:50000",partition="all",state="over_provisioned"} 0
-squire_job_sizing{job_id="129",user="uid:50000",partition="all",state="under_provisioned"} 0
-squire_job_sizing{job_id="130",user="uid:50000",partition="all",state="unknown"} 1
-squire_job_sizing{job_id="130",user="uid:50000",partition="all",state="right_sized"} 0
-squire_job_sizing{job_id="130",user="uid:50000",partition="all",state="over_provisioned"} 0
-squire_job_sizing{job_id="130",user="uid:50000",partition="all",state="under_provisioned"} 0
+lmsilva@PANDAMONIUM:~/squire$ go run ./cmd/squire --serve :9101 &
+serving /metrics on :9101
+lmsilva@PANDAMONIUM:~/squire$ curl -sS localhost:9101/metrics | grep -E "squire_job_gpus_(lit|held)"
+# HELP squire_job_gpus_lit GPU devices held by the job that have done work at some point in the run.
+# TYPE squire_job_gpus_lit gauge
+squire_job_gpus_lit{job_id="192",user="uid:50000",partition="all"} 1
+squire_job_gpus_lit{job_id="193",user="uid:50000",partition="all"} 2
+# HELP squire_job_gpus_held GPU devices allocated to the job.
+# TYPE squire_job_gpus_held gauge
+squire_job_gpus_held{job_id="192",user="uid:50000",partition="all"} 2
+squire_job_gpus_held{job_id="193",user="uid:50000",partition="all"} 2
 lmsilva@PANDAMONIUM:~/squire$
 ```
 
-#### Act on the findings by stamping the POD!
+#### Act on it by stamping the POD!
 ```
 lmsilva@PANDAMONIUM:~/squire$ go run ./cmd/squire --watch 30s --dollar-rate 0.53 --grace 1m --zombie-after 1m --act
 event emitted on slurm-worker-gpu-1 for job 130
@@ -178,20 +258,8 @@ JOBID  NAME     USER       GPUS  ELAPSED  AVG%  PEAK%  GPU-MEM        WASTED-GPU
 ^C
 stopping
 lmsilva@PANDAMONIUM:~/squire$ ZNODE=$(kubectl -n slurm exec slurm-controller-0 -c slurmctld -- squeue -h -n zombie -o %N)
-lmsilva@PANDAMONIUM:~/squire$ ZNODE=$(kubectl -n slurm exec slurm-controller-0 -c slurmctld -- squeue -h -n zombie -o %N)
 lmsilva@PANDAMONIUM:~/squire$ ZPOD=$(kubectl -n slurm get pods -l nodeset.slinky.slurm.net/pod-hostname=$ZNODE -o jsonpath='{.items[0].metadata.name}')
-lmsilva@PANDAMONIUM:~/squire$ kubectl -n slurm describe pod "$ZPOD" | tail -n 15
-    Type:        EmptyDir (a temporary directory that shares a pod's lifetime)
-    Medium:      Memory
-    SizeLimit:   <unset>
-QoS Class:       BestEffort
-Node-Selectors:  kubernetes.io/os=linux
-                 workload=gpu
-Tolerations:     node.kubernetes.io/not-ready:NoExecute op=Exists for 300s
-                 node.kubernetes.io/unreachable:NoExecute op=Exists for 300s
-                 nvidia.com/gpu=present:NoSchedule
-                 nvidia.com/gpu:NoSchedule op=Exists
-                 slinky.slurm.net/managed-node=slurm-bridge-scheduler:NoExecute
+lmsilva@PANDAMONIUM:~/squire$ kubectl -n slurm describe pod "$ZPOD" | tail -n 6
 Events:
   Type     Reason             Age    From        Message
   ----     ------             ----   ----        -------
@@ -199,7 +267,7 @@ Events:
 lmsilva@PANDAMONIUM:~/squire$
 ```
 
-### Running squire-lint
+## Using squire-lint
 
 The check reads slurmrestd and nothing else. No DCGM, no Prometheus, no kubeconfig — so it runs on a login node, where the monitoring binary cannot.
 
@@ -221,6 +289,8 @@ JOBID  NAME  SEVERITY  RULE                         FINDING
 4 findings across 4 of 5 jobs (1 already finished)
 ```
 
+`4 of 5 jobs` is the count actually judged. The fifth had already finished and was skipped.
+
 #### Options
 ```
 lmsilva@PANDAMONIUM:~/squire$ go run ./cmd/squire-lint -h
@@ -230,7 +300,6 @@ Usage of squire-lint:
   -slurm-url string
         slurmrestd base URL (default "http://localhost:6820")
 ```
-
 
 ## Squire Flags
 
@@ -244,7 +313,7 @@ Usage of squire-lint:
 | `--pod-hostname-label` | `nodeset.slinky.slurm.net/pod-hostname` | pod label carrying the Slurm node name |
 | `--pod-label` | `exported_pod` | DCGM metric label carrying the pod name |
 | `--watch` | `0` | refresh interval for top mode (0 = print once) |
-| `--wide` | `false` | show the evidence behind each verdict |
+| `--wide` | `false` | show the evidence behind each verdict, plus lit devices and time to first work |
 | `--serve` | off | expose `/metrics` on this address instead of printing a table |
 | `--serve-cache` | `30s` | how long a build is reused before `/metrics` rebuilds (0 disables) |
 | `--act` | `false` | emit Kubernetes Events for zombie findings |
@@ -257,6 +326,8 @@ Usage of squire-lint:
 | `--worked-util` | `10` | avg GPU util % proving the job did real work earlier |
 | `--mem-floor` | `0.30` | peak memory fraction below which a job is over-provisioned |
 
+Any argument that is not a flag exits 2 rather than being ignored. Go's flag parsing stops at the first non-flag argument, so a stray word would otherwise silently discard every flag after it.
+
 `--zombie-threshold` and `--zombie-window` were removed. They were named after the one verdict they produced; the rules they governed are now `--idle-util` and `--idle-window`. Passing a removed flag exits 2 with `flag provided but not defined`.
 
 Environment variables: `SLURM_JWT` for the slurmrestd token, and `SQUIRE_SLURM_URL`, `SQUIRE_SLURM_API`, `SQUIRE_PROM_URL`, `SQUIRE_NAMESPACE`, `SQUIRE_POD_HOSTNAME_LABEL`, `SQUIRE_POD_LABEL` as defaults for the flags above.
@@ -265,7 +336,9 @@ In `--serve` mode, Squire honours the scrape timeout Prometheus sends and finish
 
 ### squire-lint Flags
 
-`squire-lint` takes only the two flags above — `-slurm-url` and `-slurm-api` — and reads `SLURM_JWT` from the environment, never a flag, so the token stays out of `ps` output. It has none of `squire`'s Prometheus, Kubernetes, threshold or serve settings, because it reads none of those things.
+`squire-lint` takes only two flags — `-slurm-url` and `-slurm-api` — and reads `SLURM_JWT` from the environment, never a flag, so the token stays out of `ps` output. It has none of `squire`'s Prometheus, Kubernetes, threshold or serve settings, because it reads none of those things.
+
+Nothing reachable from `squire-lint` imports Kubernetes or Prometheus, so neither is linked into it. That is the difference between a 9.5 MB binary you can hand to a user and a 37 MB one that expects cluster credentials.
 
 ## Exported metrics
 
@@ -278,7 +351,11 @@ In `--serve` mode, Squire honours the scrape timeout Prometheus sends and finish
 | `squire_job_verdict_confidence` | gauge | `0` none, `1` low, `2` medium, `3` high. |
 | `squire_job_gpu_memory_peak_bytes` | gauge | Peak framebuffer used on a single GPU. |
 | `squire_job_gpu_memory_capacity_bytes` | gauge | That GPU's total framebuffer. |
+| `squire_job_gpus_held` | gauge | GPU devices allocated to the job. |
+| `squire_job_gpus_lit` | gauge | Devices that have done work at some point in the run. |
 | `squire_job_zombie` | gauge | Kept for compatibility; derived from `squire_job_activity`. |
+
+`squire_job_gpus_lit` is emitted **only when measured**. A Prometheus series cannot say "unknown", so an unread count is left out entirely rather than published as `0` — a dashboard averaging it would otherwise show idle devices that were never measured. Compare it against `squire_job_gpus_held` for the same job; the gap is the idle allocation.
 
 ## Design principles
 
@@ -286,7 +363,9 @@ In `--serve` mode, Squire honours the scrape timeout Prometheus sends and finish
 2. **Never judge on a snapshot.** Peak over a window, past a grace period.
 3. **Assert what you measure; hedge what you infer.** Over-provisioned is stated plainly. Possibly-under-provisioned is only ever hinted.
 4. **Measure the right thing, or say you couldn't.** Telemetry is scoped to the exact devices a job holds; where that is not possible, the output marks it.
-5. **Defaults are the product; configuration is an escape hatch.** Global overrides only — no per-job knobs.
-6. **Augment Slurm; never do its scheduling.** Squire states one thing Slurm structurally cannot see: that an allocation is doing no real work.
-7. **Never assume naming.** Nothing keys on a name a site can choose for itself. "Is this a GPU job" is `gres/gpu` in `TresAlloc`; Slurm-node to pod is the operator's own label, not string surgery.
-8. **Read-only.** Observation and reporting touch nothing on the cluster.
+5. **A measured zero and an unread value are different facts.** Nothing collapses them. A dash is not a nought.
+6. **Defaults are the product; configuration is an escape hatch.** Global overrides only — no per-job knobs.
+7. **Augment Slurm; never do its scheduling.** Squire states one thing Slurm structurally cannot see: that an allocation is doing no real work. Where Slurm already knows, Squire reports what Slurm says and names the setting that fixes it.
+8. **Never assume naming.** Nothing keys on a name a site can choose for itself. "Is this a GPU job" is `gres/gpu` in `TresAlloc`; Slurm-node to pod is the operator's own label, not string surgery.
+9. **Judge only what can still change.** Finished jobs are left alone. A job that has exited cannot be told to set a time limit.
+10. **Read-only.** Observation and reporting touch nothing on the cluster.
