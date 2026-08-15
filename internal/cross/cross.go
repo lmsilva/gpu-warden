@@ -54,19 +54,58 @@ type Job struct {
 	FirstWorkAfter time.Duration
 }
 
+// Queue is what the rest of the cluster is waiting for. It turns an idle
+// allocation from a private inefficiency into somebody else's delay.
+type Queue struct {
+	PendingGPUJobs int
+	PendingGPUs    int
+}
+
 // SlowStartAfter is the delay past which a job's startup is worth mentioning.
 // Container pulls and dataset staging routinely take minutes; a quarter of an
 // hour before any device does work is a different scale of problem, and it is
 // the platform team's problem rather than the job owner's.
 const SlowStartAfter = 15 * time.Minute
 
+// blockingIdle: this job is holding devices it has not lit while other jobs
+// are waiting for hardware. The same allocation, judged against demand.
+//
+// It reports a coincidence in time, not a causal chain. Deciding that a
+// particular waiting job would have landed on this node is the scheduler's
+// work - partitions, features, memory, topology and priority all decide it -
+// and Squire does not do Slurm's scheduling. What it can say is that idle
+// devices and unmet demand exist at the same moment, which is the fact
+// somebody needs in order to go and look.
+//
+// Only "Resources" waits count. A job held by priority or a dependency would
+// not start if every GPU on the cluster went free, so counting it would
+// manufacture pressure that is not there.
+func blockingIdle(j Job, q Queue, add func(lint.Finding)) {
+	if !j.HasLit || q.PendingGPUJobs <= 0 {
+		return
+	}
+	idle := j.GPUsRequested - j.LitGPUs
+	if idle <= 0 {
+		return
+	}
+	add(lint.Finding{JobID: j.ID, Rule: "blocking-idle-allocation", Severity: lint.Warn,
+		Message: fmt.Sprintf("%d of its %d %s %s done no work, while %d %s %s for %d %s",
+			idle, j.GPUsRequested, plural(j.GPUsRequested), pick(idle, "has", "have"),
+			q.PendingGPUJobs, pick(q.PendingGPUJobs, "job", "jobs"),
+			pick(q.PendingGPUJobs, "waits", "wait"),
+			q.PendingGPUs, plural(q.PendingGPUs))})
+}
+
 // plural renders "1 GPU" and "2 GPUs". Findings name a person's job, and a
 // message that cannot count reads as one nobody proofread.
-func plural(n int) string {
+func plural(n int) string { return pick(n, "GPU", "GPUs") }
+
+// pick chooses between a singular and a plural form.
+func pick(n int, one, many string) string {
 	if n == 1 {
-		return "GPU"
+		return one
 	}
-	return "GPUs"
+	return many
 }
 
 // Check returns the cross-source findings for one job, ordered by rule name so
@@ -75,7 +114,7 @@ func plural(n int) string {
 // Silence has three causes and all are deliberate: a job younger than its
 // grace period, telemetry that was never scoped to the job's own devices, and
 // any signal a rule needs that was not measured.
-func Check(j Job) []lint.Finding {
+func Check(j Job, q Queue) []lint.Finding {
 	if j.Elapsed < j.Grace || !j.PerGPU || j.GPUsRequested <= 0 {
 		return nil
 	}
@@ -85,16 +124,17 @@ func Check(j Job) []lint.Finding {
 	neverTouched(j, add)
 	partiallyUsed(j, add)
 	slowFirstWork(j, add)
+	blockingIdle(j, q, add)
 
 	sort.SliceStable(out, func(a, b int) bool { return out[a].Rule < out[b].Rule })
 	return out
 }
 
 // CheckAll runs Check over many jobs, preserving the caller's order.
-func CheckAll(jobs []Job) []lint.Finding {
+func CheckAll(jobs []Job, q Queue) []lint.Finding {
 	var out []lint.Finding
 	for _, j := range jobs {
-		out = append(out, Check(j)...)
+		out = append(out, Check(j, q)...)
 	}
 	return out
 }

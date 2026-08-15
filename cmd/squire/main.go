@@ -223,7 +223,7 @@ func main() {
 	// One loop that serves both modes: --watch 0 runs the body once and returns.
 	for {
 		cycleCtx, cancel := context.WithTimeout(ctx, cycleTimeout)
-		reports, _, err := runCycle(cycleCtx, b, kc, c, ev)
+		reports, queue, err := runCycle(cycleCtx, b, kc, c, ev)
 		cancel()
 
 		if err != nil {
@@ -238,7 +238,7 @@ func main() {
 				fmt.Printf("\n=== %s ===\n", time.Now().Format("15:04:05"))
 			}
 			printTable(os.Stdout, reports, c)
-			printFindings(os.Stdout, reports, c.th)
+			printFindings(os.Stdout, reports, queue, c.th)
 		}
 
 		if c.watch == 0 {
@@ -356,14 +356,16 @@ func toCrossJob(r report.JobReport, grace time.Duration) cross.Job {
 // have. Widening every row for something few of them carry would cost the
 // table its shape. The columns match squire-lint's, so a reader who has seen
 // one recognises the other.
-func printFindings(out io.Writer, reports []report.JobReport, th verdict.Thresholds) {
+func printFindings(out io.Writer, reports []report.JobReport, q report.Queue, th verdict.Thresholds) {
 	jobs := make([]cross.Job, 0, len(reports))
 	names := make(map[int]string, len(reports))
 	for _, r := range reports {
 		jobs = append(jobs, toCrossJob(r, th.GraceCeiling))
 		names[r.Job.JobID] = r.Job.Name
 	}
-	findings := cross.CheckAll(jobs)
+	findings := cross.CheckAll(jobs, cross.Queue{
+		PendingGPUJobs: q.PendingGPUJobs, PendingGPUs: q.PendingGPUs,
+	})
 	if len(findings) == 0 {
 		return
 	}

@@ -1,6 +1,7 @@
 package cross
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -52,7 +53,7 @@ func TestRules(t *testing.T) {
 	for _, tc := range cases {
 		j := live()
 		tc.mod(&j)
-		got := Check(j)
+		got := Check(j, Queue{})
 		if len(got) != len(tc.want) {
 			t.Errorf("%s: got %v, want %v", tc.name, rules(got), tc.want)
 			continue
@@ -68,12 +69,68 @@ func TestRules(t *testing.T) {
 	}
 }
 
+// TestBlockingIdleNeedsBothHalves: an idle device is a private inefficiency
+// until somebody is waiting for one. The finding exists to say when that
+// changed, so it must stay silent in an empty queue and fire in a full one.
+func TestBlockingIdleNeedsBothHalves(t *testing.T) {
+	j := live()
+	j.LitGPUs = 1 // holds four, lit one
+
+	if has(Check(j, Queue{}), "blocking-idle-allocation") {
+		t.Errorf("nothing waiting means nothing is being blocked")
+	}
+	busy := Queue{PendingGPUJobs: 3, PendingGPUs: 6}
+	for _, f := range Check(j, Queue{PendingGPUJobs: 1, PendingGPUs: 1}) {
+		if f.Rule == "blocking-idle-allocation" && strings.Contains(f.Message, "job(s)") {
+			t.Errorf("message cannot count: %s", f.Message)
+		}
+	}
+	if !has(Check(j, busy), "blocking-idle-allocation") {
+		t.Errorf("three jobs waiting and three devices idle must be reported")
+	}
+
+	// A job using everything it holds blocks nobody, however long the queue.
+	full := live()
+	if has(Check(full, busy), "blocking-idle-allocation") {
+		t.Errorf("a fully used allocation is not blocking anyone")
+	}
+
+	// And an unread device count is not evidence of idleness.
+	unknown := live()
+	unknown.HasLit, unknown.LitGPUs = false, 0
+	if has(Check(unknown, busy), "blocking-idle-allocation") {
+		t.Errorf("an unmeasured allocation must not be accused of blocking")
+	}
+}
+
+// TestBlockingIdleNamesNoVictim: deciding which waiting job would have landed
+// on this node is the scheduler's work. The message reports coincidence in
+// time, never a causal chain, so it must not name another job.
+func TestBlockingIdleNamesNoVictim(t *testing.T) {
+	j := live()
+	j.LitGPUs = 2
+	for _, f := range Check(j, Queue{PendingGPUJobs: 1, PendingGPUs: 2}) {
+		if f.Rule != "blocking-idle-allocation" {
+			continue
+		}
+		if f.JobID != j.ID {
+			t.Errorf("the finding belongs to the holder, not the waiter")
+		}
+		for _, word := range []string{"because", "blocking job", "caused"} {
+			if strings.Contains(f.Message, word) {
+				t.Errorf("message claims causation with %q: %s", word, f.Message)
+			}
+		}
+		t.Logf("%s", f.Message)
+	}
+}
+
 // TestNeverTouchedAndPartialAreExclusive: a job that lit nothing is not also a
 // job that lit some. Reporting both would be two accusations for one fact.
 func TestNeverTouchedAndPartialAreExclusive(t *testing.T) {
 	j := live()
 	j.LitGPUs = 0
-	if got := rules(Check(j)); len(got) != 1 {
+	if got := rules(Check(j, Queue{})); len(got) != 1 {
 		t.Errorf("lit zero must produce exactly one finding, got %v", got)
 	}
 }
@@ -84,12 +141,12 @@ func TestNeverTouchedAndPartialAreExclusive(t *testing.T) {
 func TestUnmeasuredIsSilent(t *testing.T) {
 	j := live()
 	j.HasLit, j.LitGPUs = false, 0
-	if got := Check(j); len(got) != 0 {
+	if got := Check(j, Queue{}); len(got) != 0 {
 		t.Errorf("an unread device count must produce nothing, got %v", rules(got))
 	}
 	j = live()
 	j.HasFirstWork, j.FirstWorkAfter = false, 0
-	if has(Check(j), "slow-first-gpu-work") {
+	if has(Check(j, Queue{}), "slow-first-gpu-work") {
 		t.Errorf("an unread first-work time must produce nothing")
 	}
 }
@@ -101,7 +158,7 @@ func TestUnmeasuredIsSilent(t *testing.T) {
 func TestNodeWideTelemetryIsSilent(t *testing.T) {
 	j := live()
 	j.PerGPU, j.LitGPUs = false, 0
-	if got := Check(j); len(got) != 0 {
+	if got := Check(j, Queue{}); len(got) != 0 {
 		t.Errorf("node-wide telemetry must produce nothing, got %v", rules(got))
 	}
 }
@@ -111,7 +168,7 @@ func TestNodeWideTelemetryIsSilent(t *testing.T) {
 func TestGraceIsRespected(t *testing.T) {
 	j := live()
 	j.Elapsed, j.LitGPUs = 5*time.Minute, 0
-	if got := Check(j); len(got) != 0 {
+	if got := Check(j, Queue{}); len(got) != 0 {
 		t.Errorf("a job inside its grace period must produce nothing, got %v", rules(got))
 	}
 }

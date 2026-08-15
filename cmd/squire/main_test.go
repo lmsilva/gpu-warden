@@ -5,12 +5,15 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/lmsilva/squire/internal/report"
+	"github.com/lmsilva/squire/internal/slurmapi"
+	"github.com/lmsilva/squire/internal/verdict"
 )
 
 // TestEventLogClaimRespectsWindow is the behaviour --watch already relied on:
@@ -323,5 +326,41 @@ func TestScrapeBudget(t *testing.T) {
 				t.Errorf("header %q: want %v, got %v", tc.header, tc.want, got)
 			}
 		})
+	}
+}
+
+// TestQueueReachesTheEngine covers the one line nothing else can: the manual
+// copy from report.Queue into cross.Queue. Two int fields of the same type,
+// side by side, in the order a transposition would look correct — and the
+// only symptom would be a finding quoting plausible wrong numbers.
+func TestQueueReachesTheEngine(t *testing.T) {
+	th := verdict.DefaultThresholds()
+	r := report.JobReport{
+		Job:     slurmapi.Job{JobID: 7, Name: "holder"},
+		GPUs:    4,
+		Elapsed: th.GraceCeiling + time.Minute,
+		PerGPU:  true,
+		HasLit:  true, LitGPUs: 1,
+	}
+	var sb strings.Builder
+	printFindings(&sb, []report.JobReport{r}, report.Queue{PendingGPUJobs: 2, PendingGPUs: 9}, th)
+	out := sb.String()
+
+	if !strings.Contains(out, "blocking-idle-allocation") {
+		t.Fatalf("idle devices and a non-empty queue must produce the finding:\n%s", out)
+	}
+	// 2 jobs waiting for 9 GPUs, not 9 jobs waiting for 2.
+	if !strings.Contains(out, "2 jobs wait for 9 GPUs") {
+		t.Errorf("queue numbers transposed or reworded:\n%s", out)
+	}
+
+	// An empty queue leaves the same allocation reported, but not as blocking.
+	var quiet strings.Builder
+	printFindings(&quiet, []report.JobReport{r}, report.Queue{}, th)
+	if strings.Contains(quiet.String(), "blocking-idle-allocation") {
+		t.Errorf("nothing waiting means nothing is blocked:\n%s", quiet.String())
+	}
+	if !strings.Contains(quiet.String(), "partially-used-allocation") {
+		t.Errorf("the underlying finding must still stand on its own:\n%s", quiet.String())
 	}
 }
