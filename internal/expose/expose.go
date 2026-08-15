@@ -54,6 +54,27 @@ func Write(w io.Writer, reports []report.JobReport) {
 		fmt.Fprintf(w, "squire_job_gpu_utilization_percent{%s} %.2f\n", ids(r), r.AvgUtil)
 	}
 
+	// Devices actually lit, next to devices held. The pair is the numerator
+	// and denominator of the partially-used finding, and neither number is
+	// derivable from the averaged utilization above.
+	fmt.Fprintln(w, "# HELP squire_job_gpus_lit GPU devices held by the job that have done work at some point in the run.")
+	fmt.Fprintln(w, "# TYPE squire_job_gpus_lit gauge")
+	for _, r := range reports {
+		// Only emitted when measured. A zero here means the job lit nothing,
+		// so publishing an unread count as zero would export a false finding.
+		if r.HasLit {
+			fmt.Fprintf(w, "squire_job_gpus_lit{%s} %d\n", ids(r), r.LitGPUs)
+		}
+	}
+	fmt.Fprintln(w)
+
+	fmt.Fprintln(w, "# HELP squire_job_gpus_held GPU devices allocated to the job.")
+	fmt.Fprintln(w, "# TYPE squire_job_gpus_held gauge")
+	for _, r := range reports {
+		fmt.Fprintf(w, "squire_job_gpus_held{%s} %d\n", ids(r), r.GPUs)
+	}
+	fmt.Fprintln(w)
+
 	fmt.Fprintln(w, "# HELP squire_job_gpu_hours_wasted Allocated-but-unused GPU-hours per running job.")
 	fmt.Fprintln(w, "# TYPE squire_job_gpu_hours_wasted gauge")
 	for _, r := range reports {
