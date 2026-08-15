@@ -374,7 +374,10 @@ func printTable(out io.Writer, reports []report.JobReport, c config) {
 	engineFaulted := false
 	header := "JOBID\tNAME\tUSER\tGPUS\tELAPSED\tAVG%\tPEAK%\tGPU-MEM\tWASTED-GPU-H\tACTIVITY\tSIZING"
 	if c.wide {
-		header += "\tWHY"
+		// LIT and FIRST-WORK are measurements rather than judgements, which
+		// is why they sit with the evidence rather than in the default table.
+		// Without them the findings below can only be trusted, not checked.
+		header += "\tLIT\tFIRST-WORK\tWHY"
 	}
 	fmt.Fprintln(w, header)
 	for _, r := range reports {
@@ -415,6 +418,18 @@ func printTable(out io.Writer, reports []report.JobReport, c config) {
 			r.Elapsed.Round(time.Minute), r.AvgUtil, r.PeakUtil, mem, cost,
 			activity, sizing)
 		if c.wide {
+			// A dash rather than a zero for both: an unmeasured signal and a
+			// measured zero mean opposite things, and a column of numbers
+			// cannot say "unknown".
+			lit := "-"
+			if r.HasLit {
+				lit = strconv.Itoa(r.LitGPUs)
+			}
+			firstWork := "-"
+			if r.HasFirstWork {
+				firstWork = r.FirstWorkAfter.Round(time.Second).String()
+			}
+			fmt.Fprintf(w, "\t%s\t%s", lit, firstWork)
 			// Every reason, not just the first. Judge appends them in
 			// priority order: what the GPU is doing, then anything that
 			// argued with it, then sizing. The first alone can assert
