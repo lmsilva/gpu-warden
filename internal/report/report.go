@@ -43,7 +43,27 @@ const (
 
 // Consumer-defined interfaces: report asks only for what it needs.
 type JobLister interface {
-	ListRunningJobs(ctx context.Context) ([]slurmapi.Job, error)
+	// ListJobs returns everything Slurm still knows about - running, pending
+	// and recently finished. Squire asks for all of it in one call rather
+	// than filtering server-side, because a job waiting for a GPU is as much
+	// a fact about the cluster as a job holding one.
+	ListJobs(ctx context.Context) ([]slurmapi.Job, error)
+}
+
+// Queue is what the rest of the cluster is waiting for, measured at the same
+// instant as the reports. It exists so a finding can say whether an idle
+// allocation is costing anybody anything right now.
+//
+// Deliberately a count and not a list of victims. Deciding which pending job
+// would have landed on which node is the scheduler's work, and guessing at it
+// would be inventing a causal claim Squire cannot support.
+type Queue struct {
+	// PendingGPUJobs counts jobs waiting whose reason is exactly Resources -
+	// they are short of hardware, not blocked by priority, a dependency, a
+	// held state or a licence.
+	PendingGPUJobs int
+	// PendingGPUs is how many devices those jobs are asking for in total.
+	PendingGPUs int
 }
 
 type Querier interface {
@@ -142,27 +162,49 @@ func (b *Builder) podLabel() string {
 	return b.PodLabel
 }
 
-// Build produces one JobReport per running GPU job.
-func (b *Builder) Build(ctx context.Context) ([]JobReport, error) {
+// Build produces one JobReport per running GPU job, and a summary of what the
+// queue is waiting for.
+func (b *Builder) Build(ctx context.Context) ([]JobReport, Queue, error) {
 	th := b.thresholds()
-	jobs, err := b.Jobs.ListRunningJobs(ctx)
+	all, err := b.Jobs.ListJobs(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("listing jobs: %w", err)
+		return nil, Queue{}, fmt.Errorf("listing jobs: %w", err)
 	}
+	// Split once. A job Slurm has finished with is neither running work nor
+	// waiting work, so it belongs to neither half.
+	var jobs []slurmapi.Job
+	var q Queue
+	for _, j := range all {
+		switch j.BaseState() {
+		case "RUNNING":
+			jobs = append(jobs, j)
+		case "PENDING":
+			// Only "Resources" means short of hardware. Priority, held,
+			// dependency and licence waits are queueing for reasons no idle
+			// GPU would fix, and counting them would inflate the pressure.
+			if j.StateReason == "Resources" {
+				if n := slurmapi.GPUCount(j); n > 0 {
+					q.PendingGPUJobs++
+					q.PendingGPUs += n
+				}
+			}
+		}
+	}
+
 	// Fail with a sentence, not a stack trace: an unattended tool should say
 	// what was misconfigured, and a nil NodeResolver panics deep inside Build.
 	if b.Nodes == nil {
-		return nil, fmt.Errorf("report.Builder.Nodes is nil: a NodeResolver is required")
+		return nil, Queue{}, fmt.Errorf("report.Builder.Nodes is nil: a NodeResolver is required")
 	}
 	// One lookup per cycle, not per job.
 	nodeToPod, err := b.Nodes.PodNames(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("resolving node-to-pod mapping: %w", err)
+		return nil, Queue{}, fmt.Errorf("resolving node-to-pod mapping: %w", err)
 	}
 	// One fleet-level check per cycle, before any job is judged.
 	faulted, err := b.engineFaulted(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("checking engine signal health: %w", err)
+		return nil, Queue{}, fmt.Errorf("checking engine signal health: %w", err)
 	}
 	var out []JobReport
 	for _, j := range jobs {
@@ -172,7 +214,7 @@ func (b *Builder) Build(ctx context.Context) ([]JobReport, error) {
 		}
 		nodes, err := slurmapi.ExpandNodes(j.Nodes)
 		if err != nil {
-			return nil, fmt.Errorf("expanding nodes for job %d: %w", j.JobID, err)
+			return nil, Queue{}, fmt.Errorf("expanding nodes for job %d: %w", j.JobID, err)
 		}
 		// Translate Slurm node names into pod names. A node absent from the map
 		// is skipped rather than fatal: a worker pod can be mid-restart.
@@ -199,7 +241,7 @@ func (b *Builder) Build(ctx context.Context) ([]JobReport, error) {
 
 		m, err := b.collect(ctx, targets, elapsed, hasStart, th, !faulted)
 		if err != nil {
-			return nil, fmt.Errorf("collecting telemetry for job %d: %w", j.JobID, err)
+			return nil, Queue{}, fmt.Errorf("collecting telemetry for job %d: %w", j.JobID, err)
 		}
 
 		r := JobReport{
@@ -221,7 +263,7 @@ func (b *Builder) Build(ctx context.Context) ([]JobReport, error) {
 		r.Verdict = verdict.Judge(m, th)
 		out = append(out, r)
 	}
-	return out, nil
+	return out, q, nil
 }
 
 // target is one pod and, when known, the GPU device indices on it that belong

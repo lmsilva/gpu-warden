@@ -15,7 +15,7 @@ import (
 
 type fakeJobs struct{ jobs []slurmapi.Job }
 
-func (f fakeJobs) ListRunningJobs(ctx context.Context) ([]slurmapi.Job, error) {
+func (f fakeJobs) ListJobs(ctx context.Context) ([]slurmapi.Job, error) {
 	return f.jobs, nil
 }
 
@@ -197,7 +197,7 @@ func TestBuild(t *testing.T) {
 		"w-3": "pod-w-3", "w-4": "pod-w-4", "w-9": "pod-w-9"}
 	b := &Builder{Jobs: jobs, Prom: prom, Nodes: nodes, PodLabel: "exported_pod",
 		Thresholds: verdict.DefaultThresholds()}
-	got, err := b.Build(context.Background())
+	got, _, err := b.Build(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -288,7 +288,7 @@ func TestEngineFaultGuard(t *testing.T) {
 	}
 	b := &Builder{Jobs: jobs, Prom: prom, Nodes: nodes, PodLabel: "exported_pod",
 		Thresholds: verdict.DefaultThresholds()}
-	got, err := b.Build(context.Background())
+	got, _, err := b.Build(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -322,7 +322,7 @@ func TestEngineUnlitIsBelieved(t *testing.T) {
 	}
 	b := &Builder{Jobs: jobs, Prom: prom, Nodes: nodes, PodLabel: "exported_pod",
 		Thresholds: verdict.DefaultThresholds()}
-	got, err := b.Build(context.Background())
+	got, _, err := b.Build(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -403,7 +403,7 @@ func TestWindowClampedToJobAge(t *testing.T) {
 	}
 	b := &Builder{Jobs: jobs, Prom: prom, Nodes: fakeNodes{"w-0": "pod-w-0"},
 		PodLabel: "exported_pod", Thresholds: verdict.DefaultThresholds()}
-	if _, err := b.Build(context.Background()); err != nil {
+	if _, _, err := b.Build(context.Background()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(seen) == 0 {
@@ -478,5 +478,31 @@ func TestUnmeasuredLitStaysUnset(t *testing.T) {
 	}
 	if m.HasFirstWork {
 		t.Errorf("first-work must stay unset when nothing was lit")
+	}
+}
+
+// TestQueueCountsOnlyResourceWaits: an idle GPU cannot help a job that is
+// waiting for priority, a dependency or a licence. Counting those would
+// manufacture pressure that is not there and escalate a finding on it.
+func TestQueueCountsOnlyResourceWaits(t *testing.T) {
+	jobs := fakeJobs{jobs: []slurmapi.Job{
+		{JobID: 1, State: []string{"RUNNING"}, Nodes: "w-1", TresAlloc: "gres/gpu=1"},
+		{JobID: 2, State: []string{"PENDING"}, StateReason: "Resources", TresPerNode: "gres/gpu:2"},
+		{JobID: 3, State: []string{"PENDING"}, StateReason: "Resources", TresPerNode: "gres/gpu:1"},
+		{JobID: 4, State: []string{"PENDING"}, StateReason: "Priority", TresPerNode: "gres/gpu:8"},
+		{JobID: 5, State: []string{"PENDING"}, StateReason: "Dependency", TresPerNode: "gres/gpu:4"},
+		{JobID: 6, State: []string{"PENDING"}, StateReason: "Resources"}, // CPU-only
+		{JobID: 7, State: []string{"COMPLETED"}, StateReason: "Resources", TresPerNode: "gres/gpu:4"},
+	}}
+	b := &Builder{Jobs: jobs, Nodes: fakeNodes{}, Prom: fakeProm{byGPU: map[string]gpu{}}}
+	_, q, err := b.Build(context.Background())
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if q.PendingGPUJobs != 2 {
+		t.Errorf("only Resources waits for GPUs count, got %d", q.PendingGPUJobs)
+	}
+	if q.PendingGPUs != 3 {
+		t.Errorf("expected 2+1 devices waiting, got %d", q.PendingGPUs)
 	}
 }

@@ -47,7 +47,7 @@ func ids(r report.JobReport) string {
 }
 
 // Write renders one scrape's worth of Squire metrics.
-func Write(w io.Writer, reports []report.JobReport) {
+func Write(w io.Writer, reports []report.JobReport, q report.Queue) {
 	fmt.Fprintln(w, "# HELP squire_job_gpu_utilization_percent Average GPU utilization per running job.")
 	fmt.Fprintln(w, "# TYPE squire_job_gpu_utilization_percent gauge")
 	for _, r := range reports {
@@ -57,6 +57,19 @@ func Write(w io.Writer, reports []report.JobReport) {
 	// Devices actually lit, next to devices held. The pair is the numerator
 	// and denominator of the partially-used finding, and neither number is
 	// derivable from the averaged utilization above.
+	// Cluster-level pressure, with no job labels: it is a fact about the
+	// queue, not about any one job. Always emitted, including zero, so a
+	// dashboard can tell "nobody waiting" from "Squire is not running".
+	fmt.Fprintln(w, "# HELP squire_pending_gpu_jobs Jobs waiting because the cluster is short of GPUs.")
+	fmt.Fprintln(w, "# TYPE squire_pending_gpu_jobs gauge")
+	fmt.Fprintf(w, "squire_pending_gpu_jobs %d\n", q.PendingGPUJobs)
+	fmt.Fprintln(w)
+
+	fmt.Fprintln(w, "# HELP squire_pending_gpus GPU devices those waiting jobs are asking for.")
+	fmt.Fprintln(w, "# TYPE squire_pending_gpus gauge")
+	fmt.Fprintf(w, "squire_pending_gpus %d\n", q.PendingGPUs)
+	fmt.Fprintln(w)
+
 	fmt.Fprintln(w, "# HELP squire_job_gpus_lit GPU devices held by the job that have done work at some point in the run.")
 	fmt.Fprintln(w, "# TYPE squire_job_gpus_lit gauge")
 	for _, r := range reports {

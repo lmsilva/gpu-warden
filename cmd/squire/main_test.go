@@ -99,17 +99,17 @@ func fixedReports() []report.JobReport {
 func TestCycleCacheServesWithinWindow(t *testing.T) {
 	c := newCycleCache(time.Hour)
 	var builds int
-	build := func(context.Context) ([]report.JobReport, error) {
+	build := func(context.Context) (cycle, error) {
 		builds++
-		return fixedReports(), nil
+		return cycle{reports: fixedReports()}, nil
 	}
 	for i := 0; i < 10; i++ {
 		got, err := c.get(context.Background(), build)
 		if err != nil {
 			t.Fatalf("scrape %d: unexpected error: %v", i, err)
 		}
-		if len(got) != 1 {
-			t.Fatalf("scrape %d: want 1 report, got %d", i, len(got))
+		if len(got.reports) != 1 {
+			t.Fatalf("scrape %d: want 1 report, got %d", i, len(got.reports))
 		}
 	}
 	if builds != 1 {
@@ -122,9 +122,9 @@ func TestCycleCacheServesWithinWindow(t *testing.T) {
 func TestCycleCacheRebuildsAfterWindow(t *testing.T) {
 	c := newCycleCache(time.Millisecond)
 	var builds int
-	build := func(context.Context) ([]report.JobReport, error) {
+	build := func(context.Context) (cycle, error) {
 		builds++
-		return fixedReports(), nil
+		return cycle{reports: fixedReports()}, nil
 	}
 	if _, err := c.get(context.Background(), build); err != nil {
 		t.Fatal(err)
@@ -144,9 +144,9 @@ func TestCycleCacheRebuildsAfterWindow(t *testing.T) {
 func TestCycleCacheDisabled(t *testing.T) {
 	c := newCycleCache(0)
 	var builds int
-	build := func(context.Context) ([]report.JobReport, error) {
+	build := func(context.Context) (cycle, error) {
 		builds++
-		return fixedReports(), nil
+		return cycle{reports: fixedReports()}, nil
 	}
 	for i := 0; i < 3; i++ {
 		if _, err := c.get(context.Background(), build); err != nil {
@@ -164,9 +164,9 @@ func TestCycleCacheDisabled(t *testing.T) {
 func TestCycleCacheDoesNotCacheErrors(t *testing.T) {
 	c := newCycleCache(time.Hour)
 	var builds int
-	failing := func(context.Context) ([]report.JobReport, error) {
+	failing := func(context.Context) (cycle, error) {
 		builds++
-		return nil, errors.New("slurmrestd unreachable")
+		return cycle{}, errors.New("slurmrestd unreachable")
 	}
 	if _, err := c.get(context.Background(), failing); err == nil {
 		t.Fatal("want an error from a failing build")
@@ -179,8 +179,8 @@ func TestCycleCacheDoesNotCacheErrors(t *testing.T) {
 	}
 
 	// And a success right after a failure must be served normally.
-	if _, err := c.get(context.Background(), func(context.Context) ([]report.JobReport, error) {
-		return fixedReports(), nil
+	if _, err := c.get(context.Background(), func(context.Context) (cycle, error) {
+		return cycle{reports: fixedReports()}, nil
 	}); err != nil {
 		t.Errorf("recovery build failed: %v", err)
 	}
@@ -196,11 +196,11 @@ func TestCycleCacheCollapsesConcurrentScrapes(t *testing.T) {
 	c := newCycleCache(time.Hour)
 
 	var builds atomic.Int64
-	build := func(context.Context) ([]report.JobReport, error) {
+	build := func(context.Context) (cycle, error) {
 		builds.Add(1)
 		// Long enough that the others are certainly waiting on the lock.
 		time.Sleep(20 * time.Millisecond)
-		return fixedReports(), nil
+		return cycle{reports: fixedReports()}, nil
 	}
 
 	start := make(chan struct{})
@@ -232,18 +232,18 @@ func TestCycleCacheServesEmptyBuilds(t *testing.T) {
 	c := newCycleCache(time.Hour)
 
 	var builds atomic.Int64
-	build := func(context.Context) ([]report.JobReport, error) {
+	build := func(context.Context) (cycle, error) {
 		builds.Add(1)
-		return nil, nil // an idle cluster: no GPU jobs, no error
+		return cycle{}, nil // an idle cluster: no GPU jobs, no error
 	}
 
 	for i := 0; i < 5; i++ {
-		reports, err := c.get(context.Background(), build)
+		got, err := c.get(context.Background(), build)
 		if err != nil {
 			t.Fatalf("scrape %d failed: %v", i, err)
 		}
-		if len(reports) != 0 {
-			t.Errorf("scrape %d: want no reports, got %d", i, len(reports))
+		if len(got.reports) != 0 {
+			t.Errorf("scrape %d: want no reports, got %d", i, len(got.reports))
 		}
 	}
 	if got := builds.Load(); got != 1 {
@@ -261,10 +261,10 @@ func TestCycleCacheWaiterHonoursContext(t *testing.T) {
 	release := make(chan struct{})
 	holding := make(chan struct{})
 	go func() {
-		_, _ = c.get(context.Background(), func(context.Context) ([]report.JobReport, error) {
+		_, _ = c.get(context.Background(), func(context.Context) (cycle, error) {
 			close(holding)
 			<-release
-			return fixedReports(), nil
+			return cycle{reports: fixedReports()}, nil
 		})
 	}()
 	<-holding
@@ -276,9 +276,9 @@ func TestCycleCacheWaiterHonoursContext(t *testing.T) {
 	var built atomic.Int64
 	done := make(chan error, 1)
 	go func() {
-		_, err := c.get(ctx, func(context.Context) ([]report.JobReport, error) {
+		_, err := c.get(ctx, func(context.Context) (cycle, error) {
 			built.Add(1)
-			return fixedReports(), nil
+			return cycle{reports: fixedReports()}, nil
 		})
 		done <- err
 	}()

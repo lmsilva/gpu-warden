@@ -182,8 +182,9 @@ func main() {
 			// to finish into a closed connection.
 			ctx, cancel := context.WithTimeout(r.Context(), scrapeBudget(r))
 			defer cancel()
-			reports, err := cache.get(ctx, func(ctx context.Context) ([]report.JobReport, error) {
-				return runCycle(ctx, b, kc, c, ev)
+			got, err := cache.get(ctx, func(ctx context.Context) (cycle, error) {
+				r, q, err := runCycle(ctx, b, kc, c, ev)
+				return cycle{reports: r, queue: q}, err
 			})
 			if err != nil {
 				// 500 rather than a partial body: Prometheus will mark the target
@@ -192,7 +193,7 @@ func main() {
 				return
 			}
 			w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-			expose.Write(w, reports)
+			expose.Write(w, got.reports, got.queue)
 		})
 
 		// Explicit timeouts. without them, ListenAndServe leaves all of these at zero,
@@ -222,7 +223,7 @@ func main() {
 	// One loop that serves both modes: --watch 0 runs the body once and returns.
 	for {
 		cycleCtx, cancel := context.WithTimeout(ctx, cycleTimeout)
-		reports, err := runCycle(cycleCtx, b, kc, c, ev)
+		reports, _, err := runCycle(cycleCtx, b, kc, c, ev)
 		cancel()
 
 		if err != nil {
@@ -265,11 +266,20 @@ func main() {
 // Prometheus abandons a scrape after its own timeout, which is shorter than
 // cycleTimeout, and a waiter blocked on a mutex would keep waiting for a
 // client that has already gone.
-type cycleCache struct {
-	sem     chan struct{}
-	minAge  time.Duration
-	at      time.Time
+// cycle is one build's whole output: the per-job reports and the queue
+// pressure measured at the same instant. They are cached together because a
+// finding that crosses them would otherwise pair fresh reports with a stale
+// queue, or the reverse.
+type cycle struct {
 	reports []report.JobReport
+	queue   report.Queue
+}
+
+type cycleCache struct {
+	sem    chan struct{}
+	minAge time.Duration
+	at     time.Time
+	last   cycle
 }
 
 // newCycleCache is required rather than optional: a nil channel blocks
@@ -285,40 +295,40 @@ func newCycleCache(minAge time.Duration) *cycleCache {
 // Freshness is judged by the timestamp, never by the slice. report.Build
 // returns nil when no GPU jobs are running, so a c.reports != nil test would
 // never cache anything on an idle cluster.
-func (c *cycleCache) get(ctx context.Context, build func(context.Context) ([]report.JobReport, error)) ([]report.JobReport, error) {
+func (c *cycleCache) get(ctx context.Context, build func(context.Context) (cycle, error)) (cycle, error) {
 	// Taking the slot is the lock. The ctx case is what a mutex cannot do:
 	// a scrape whose client has given up stops waiting and returns.
 	select {
 	case c.sem <- struct{}{}:
 		defer func() { <-c.sem }()
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return cycle{}, ctx.Err()
 	}
 	if !c.at.IsZero() && time.Since(c.at) < c.minAge {
-		return c.reports, nil
+		return c.last, nil
 	}
-	reports, err := build(ctx)
+	got, err := build(ctx)
 	if err != nil {
-		return nil, err
+		return cycle{}, err
 	}
-	c.at, c.reports = time.Now(), reports
-	return reports, nil
+	c.at, c.last = time.Now(), got
+	return got, nil
 }
 
 // runCycle builds the reports and, when --act is set, emits Events. Both output
 // modes go through this single function, which is what lets --serve and --act
 // compose without duplicating the decision logic.
-func runCycle(ctx context.Context, b *report.Builder, kc *kube.Client, c config, ev *eventLog) ([]report.JobReport, error) {
-	reports, err := b.Build(ctx)
+func runCycle(ctx context.Context, b *report.Builder, kc *kube.Client, c config, ev *eventLog) ([]report.JobReport, report.Queue, error) {
+	reports, queue, err := b.Build(ctx)
 	if err != nil {
-		return nil, err
+		return nil, report.Queue{}, err
 	}
 	if c.act {
 		if err := actOnZombies(ctx, kc, reports, c.th.IdleWindow, ev); err != nil {
-			return reports, fmt.Errorf("acting on zombies: %w", err)
+			return reports, queue, fmt.Errorf("acting on zombies: %w", err)
 		}
 	}
-	return reports, nil
+	return reports, queue, nil
 }
 
 // printTable renders reports as a top-style table: one column per verdict axis,
