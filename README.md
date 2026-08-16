@@ -20,6 +20,8 @@ Squire answers three questions, and keeping them apart is what keeps the answers
 
 **`squire` is operator-side.** It needs a kubeconfig, because the Slurm-node-to-pod mapping is what scopes GPU telemetry to a job's own devices. A user on a login node has no kubeconfig and should not need one, which is why `squire-lint` is a separate binary that reads only slurmrestd.
 
+Both ship in one container image and as plain binaries. **[Running it in a cluster](docs/deployment.md)** covers the manifests, the Slurm token, and what Squire is granted.
+
 A verdict describes a device. A check produces a *finding* — the word the output uses — which names somebody's job and is read by their colleagues. That is why the bar for producing one is higher than for reporting a number.
 
 ---
@@ -318,6 +320,46 @@ JOBID  NAME  SEVERITY  RULE                         FINDING
 
 `4 of 5 jobs` is the count actually judged. The fifth had already finished and was skipped.
 
+#### The fast way, if Slurm runs in Kubernetes
+
+Nothing to install and nothing to deploy — one throwaway pod from the published image, using your own Slurm identity.
+
+**Find slurmrestd.** Search by port rather than by name: 6820 is slurmrestd's default, and the Service is called whatever your install called it.
+
+```
+lmsilva@PANDAMONIUM:~/squire$ kubectl get svc -A | awk 'NR==1 || /6820/'
+NAMESPACE   NAME            TYPE        CLUSTER-IP       EXTERNAL-IP   PORT(S)    AGE
+slurm       slurm-restapi   ClusterIP   10.100.186.89    <none>        6820/TCP   35d
+```
+
+**Build the URL from that row** — `http://<NAME>.<NAMESPACE>.svc:6820`. The rest of this section uses a variable, so substitute your own values once here and the commands below are copy-paste:
+
+```
+lmsilva@PANDAMONIUM:~/squire$ RESTAPI=http://slurm-restapi.slurm.svc:6820
+lmsilva@PANDAMONIUM:~/squire$ NS=slurm
+```
+
+The fully qualified `.svc` form resolves from any namespace, so it does not matter where the pod lands.
+
+**Mint a token for yourself** from the controller pod:
+
+```
+lmsilva@PANDAMONIUM:~/squire$ TOKEN=$(kubectl -n $NS exec slurm-controller-0 -c slurmctld -- scontrol token username=$USER lifespan=600 | cut -d= -f2)
+```
+
+**Run the check:**
+
+```
+lmsilva@PANDAMONIUM:~/squire$ kubectl -n $NS run squire-lint --rm -i --restart=Never \
+  --image=ghcr.io/lmsilva/squire:v0.1.0 \
+  --env="SLURM_JWT=$TOKEN" \
+  --command -- /usr/local/bin/squire-lint --slurm-url $RESTAPI
+```
+
+`--rm` removes the pod when it exits, and the exit code comes back to your shell, so this works in a script. `--command` is needed because the image's entrypoint is `squire`, not `squire-lint`.
+
+Nothing here is specific to any Slurm operator — a reachable slurmrestd and a token is the whole requirement. For a recurring check, the same `command` in a `CronJob` gives you a nightly report.
+
 #### Options
 ```
 lmsilva@PANDAMONIUM:~/squire$ go run ./cmd/squire-lint -h
@@ -334,6 +376,7 @@ Usage of squire-lint:
 |---|---|---|
 | `--slurm-url` | `http://localhost:6820` | slurmrestd base URL |
 | `--slurm-api` | `v0.0.44` | slurmrestd API version |
+| `--slurm-token-file` | unset | read the Slurm token from this file on every request instead of from `SLURM_JWT` |
 | `--prom-url` | `http://localhost:9090` | Prometheus base URL |
 | `--kubeconfig` | `$KUBECONFIG`, else `~/.kube/config` | kubeconfig path |
 | `--namespace` | `slurm` | namespace holding the Slurm worker pods |
@@ -357,15 +400,41 @@ Any argument that is not a flag exits 2 rather than being ignored. Go's flag par
 
 `--zombie-threshold` and `--zombie-window` were removed. They were named after the one verdict they produced; the rules they governed are now `--idle-util` and `--idle-window`. Passing a removed flag exits 2 with `flag provided but not defined`.
 
+**`--slurm-token-file` exists because a token in an environment variable cannot be replaced.** A process's environment cannot be changed from outside, so a token read at startup is fixed until the process restarts — and when it expires every call returns `511`. A file is re-read on every request, so replacing it is enough and nothing restarts. See [deployment](docs/deployment.md) for how that works in a cluster.
+
 Environment variables: `SLURM_JWT` for the slurmrestd token, and `SQUIRE_SLURM_URL`, `SQUIRE_SLURM_API`, `SQUIRE_PROM_URL`, `SQUIRE_NAMESPACE`, `SQUIRE_POD_HOSTNAME_LABEL`, `SQUIRE_POD_LABEL` as defaults for the flags above.
 
 In `--serve` mode, Squire honours the scrape timeout Prometheus sends and finishes just inside it, so a slow cluster gets an error you can read instead of a dropped connection.
 
 ### squire-lint Flags
 
-`squire-lint` takes only two flags — `-slurm-url` and `-slurm-api` — and reads `SLURM_JWT` from the environment, never a flag, so the token stays out of `ps` output. It has none of `squire`'s Prometheus, Kubernetes, threshold or serve settings, because it reads none of those things.
+`squire-lint` takes only three flags — `-slurm-url`, `-slurm-api` and `-slurm-token-file` — and reads `SLURM_JWT` from the environment, never a flag, so the token stays out of `ps` output. It has none of `squire`'s Prometheus, Kubernetes, threshold or serve settings, because it reads none of those things.
 
 Nothing reachable from `squire-lint` imports Kubernetes or Prometheus, so neither is linked into it. That is the difference between a 9.5 MB binary you can hand to a user and a 37 MB one that expects cluster credentials.
+
+## Versions and compatibility
+
+`squire --version` reports what a binary was built as. Releases are tagged `vX.Y.Z`; the image is published for `linux/amd64` and `linux/arm64` on the same tag, alongside plain binaries and checksums.
+
+```
+lmsilva@PANDAMONIUM:~/squire$ docker run --rm ghcr.io/lmsilva/squire:dev --version
+squire dev go1.26.5 linux/amd64
+```
+
+A build that was not stamped says `dev`, which is the truthful answer rather than a version nobody released.
+
+**What a version promises.** Squire is pre-1.0, so the surface is still moving — but not arbitrarily. These are covered by the version number:
+
+- Flag names and their default values
+- Exit codes
+- Metric names and labels
+- Rule identifiers, like `partially-used-allocation`
+- Verdict state names, like `zombie` and `over-provisioned`
+- The Kubernetes Event reason, `GPUAllocationIdle`
+
+**Deliberately not covered: the wording of findings, and table layout.** Those get better with use, and freezing them would help nobody. Script against rule identifiers and metric names, never against message text.
+
+**Pin a version in anything you deploy.** There is no `latest` tag before 1.0: a moving tag cannot be rolled back to a known state, and two pods started a week apart could be running different code.
 
 ## Exported metrics
 

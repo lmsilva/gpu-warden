@@ -107,6 +107,14 @@ spec:
             - --slurm-url=http://slurm-restapi.slurm.svc:6820
             - --prom-url=http://prometheus-operated.prometheus.svc:9090
             - --slurm-token-file=/etc/squire/slurm-token
+            # Recommended. Records zombie findings as Kubernetes Events on the
+            # pod backing the Slurm node, so a finding reaches whoever already
+            # watches that pod instead of waiting to be scraped and charted.
+            #
+            # Off by default only because it is the one thing Squire writes to
+            # the cluster, and that should be a decision rather than a
+            # surprise. Uncomment it and keep the events rule in the Role.
+            # - --act
           ports:
             - name: metrics
               containerPort: 9101
@@ -161,3 +169,4 @@ spec:
     - name: metrics
       port: 9101
       targetPort: metrics
+
