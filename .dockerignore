@@ -1,0 +1,6 @@
+.git
+.gitignore
+.squire-env
+scripts
+*.md
+!README.md
