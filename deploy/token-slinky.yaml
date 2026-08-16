@@ -1,0 +1,58 @@
+# Optional: have the Slinky operator mint Squire's Slurm token.
+#
+# Apply this only on a cluster running slurm-operator. It produces the Secret
+# that deploy/squire.yaml expects, so nothing else changes. On a plain Slurm
+# cluster, create that Secret yourself instead - see the comment in that file.
+#
+# The operator holds the JWT signing key and mints from it. Squire deliberately
+# does not: the power to create tokens is the power of root on a Slurm cluster,
+# which is a far larger thing to hand a reporting tool than a token that can
+# only read.
+apiVersion: slinky.slurm.net/v1beta1
+kind: Token
+metadata:
+  name: squire
+  namespace: slurm
+spec:
+  # The signing key the operator already manages. Confirm the names against
+  # your cluster - they differ between Slinky versions.
+  jwtKeyRef:
+    name: slurm-auth-jwt
+    key: jwt.key
+
+  # Squire reads /jobs, /nodes and /partitions and nothing else, and an
+  # ordinary account can read all three. Do not use root: a Slurm token
+  # carries that account's full powers, not a read-only subset, so a root
+  # token could cancel jobs Squire would never touch.
+  #
+  # Set this to an account that exists on your cluster.
+  #
+  # The exception is a site running PrivateData=jobs, where an ordinary
+  # account sees only its own jobs and Squire's output collapses to almost
+  # nothing. That is the one case for a privileged account, and it should be
+  # a decision rather than a default.
+  #
+  # Note "slurm" does not work: a token minted for the SlurmUser is refused
+  # on authenticated endpoints with 511 while /ping still answers 200.
+  #username: REPLACE_WITH_A_SLURM_ACCOUNT
+  username: luis
+
+  # Long, because nothing renews it.
+  #
+  # refresh: true makes the Secret mutable, but the controller was observed
+  # not to reissue on a schedule - a 10m token was watched for 20 minutes and
+  # never reissued. slurmrestd does enforce expiry, returning 511, so a short
+  # lifetime here would simply stop working.
+  #
+  # An expired token is visible rather than silent: /metrics starts failing,
+  # the readiness probe fails with it, and the pod leaves the Service. Fixing
+  # it is deleting and reapplying this resource; Squire picks the new token up
+  # on its next request without a restart.
+  #
+  # Shorten this if you have something that reissues on a schedule.
+  lifetime: 8760h
+  refresh: true
+
+  secretRef:
+    name: squire-slurm-token
+    key: SLURM_JWT

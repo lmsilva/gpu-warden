@@ -1,0 +1,157 @@
+# Raw manifests for running Squire in a cluster. Enough to run it yourself,
+# deliberately not a packaged chart.
+#
+# Squire reads Slurm, Prometheus and the Kubernetes API. Its only write to the
+# cluster is the optional Kubernetes Event behind --act, which is why the role
+# below is as small as it is.
+#
+# Adjust the namespace, the two URLs and the image tag before applying.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: squire
+  namespace: slurm
+---
+# Namespaced, not cluster-wide. Squire only ever looks at the Slurm worker
+# pods in one namespace, so a ClusterRole would be asking for reach it does
+# not use.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: squire
+  namespace: slurm
+rules:
+  # Reading pods is the Slurm-node-to-pod bridge: it is what scopes GPU
+  # telemetry to the devices a job actually holds.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  # Creating events is the only write, and only when --act is set. Drop this
+  # rule if you run without it - the args below do not enable it.
+  #
+  # Be careful turning it on here: the at-most-once guard that stops a zombie
+  # being stamped twice lives in memory, so a pod that restarts will re-stamp
+  # every zombie it still sees. That is tolerable for a command you run by
+  # hand and less so for a Deployment.
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: squire
+  namespace: slurm
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: squire
+subjects:
+  - kind: ServiceAccount
+    name: squire
+    namespace: slurm
+---
+# The Slurm token, expected to already exist under this name with this key.
+#
+# It is NOT created here, because how a site mints one differs: on a Slinky
+# cluster apply deploy/token-slinky.yaml, which has the operator do it. On a
+# plain Slurm cluster, create it yourself:
+#
+#   kubectl -n slurm create secret generic squire-slurm-token \
+#     --from-literal=SLURM_JWT="$(scontrol token username=squire lifespan=infinite | cut -d= -f2)"
+#
+# Squire re-reads the mounted file on every request, so replacing this secret
+# is enough - the pod does not need restarting.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: squire
+  namespace: slurm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: squire
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: squire
+    spec:
+      serviceAccountName: squire
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: squire
+          # Pin a released version, never :latest. A Deployment on a moving
+          # tag cannot be rolled back to a known state, and two pods started
+          # a week apart can be running different code.
+          #
+          # Tags are published by the release workflow: a semver tag for what
+          # you deploy, and a sha- tag for identifying a rebuild.
+          image: ghcr.io/lmsilva/squire:v0.1.0
+          args:
+            - --serve=:9101
+            # Confirm both against your cluster before applying - service
+            # names differ by chart and release name. Find them with:
+            #   kubectl get svc -A | grep -iE "restapi|prometheus"
+            - --slurm-url=http://slurm-restapi.slurm.svc:6820
+            - --prom-url=http://prometheus-operated.prometheus.svc:9090
+            - --slurm-token-file=/etc/squire/slurm-token
+          ports:
+            - name: metrics
+              containerPort: 9101
+          # Squire writes nothing to disk and needs no capabilities. The
+          # binary is static and the filesystem can be read-only.
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: slurm-token
+              mountPath: /etc/squire
+              readOnly: true
+          # /metrics is the readiness signal: it is exactly what a scrape
+          # does, so a pod that passes this is a pod Prometheus can use.
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 30
+            # A build talks to three systems, and the handler honours the
+            # scrape budget it is given. Allow for a slow cluster rather than
+            # restarting a pod that is merely waiting.
+            timeoutSeconds: 20
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+      volumes:
+        - name: slurm-token
+          secret:
+            secretName: squire-slurm-token
+            items:
+              - key: SLURM_JWT
+                path: slurm-token
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: squire
+  namespace: slurm
+  labels:
+    app.kubernetes.io/name: squire
+spec:
+  selector:
+    app.kubernetes.io/name: squire
+  ports:
+    - name: metrics
+      port: 9101
+      targetPort: metrics
