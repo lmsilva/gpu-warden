@@ -18,6 +18,8 @@ Squire answers three questions, and keeping them apart is what keeps the answers
 
 `squire-lint` runs the job checks. `squire` produces the verdicts and the allocation checks.
 
+**`squire` is operator-side.** It needs a kubeconfig, because the Slurm-node-to-pod mapping is what scopes GPU telemetry to a job's own devices. A user on a login node has no kubeconfig and should not need one, which is why `squire-lint` is a separate binary that reads only slurmrestd.
+
 A verdict describes a device. A check produces a *finding* — the word the output uses — which names somebody's job and is read by their colleagues. That is why the bar for producing one is higher than for reporting a number.
 
 ---
@@ -99,6 +101,7 @@ These need both halves. *"Requested eight GPUs"* is a configuration fact that sa
 | `partially-used-allocation` | warn | The job holds more GPUs than it has ever lit |
 | `gpu-requested-never-touched` | warn | The job holds GPUs and none has ever done work |
 | `slow-first-gpu-work` | note | A long gap between the job starting and its first device working |
+| `blocking-idle-allocation` | warn | The job holds devices it has not lit while other jobs wait for GPUs |
 
 Measured on a 4-GPU node, two jobs each holding two devices:
 
@@ -118,11 +121,35 @@ Both jobs read `healthy:medium` and `over-provisioned`. Looking only at utilizat
 
 **`FIRST-WORK` separates startup idleness from waste idleness.** Container pulls, dataset staging and kernel compilation are not the same as an abandoned allocation, and nothing else Squire measures tells them apart.
 
+### When idle stops being free
+
+The first three are true whether the cluster is empty or full. Four devices held and one lit costs nothing on a quiet Saturday and costs three teams their afternoon on a Tuesday, and nothing above can tell those apart.
+
+`blocking-idle-allocation` is that difference. Measured on a single-GPU node with one job holding it and another waiting:
+
+```
+JOBID  NAME  USER       GPUS  ELAPSED  AVG%  PEAK%  GPU-MEM       WASTED-GPU-H  ACTIVITY     SIZING  LIT  FIRST-WORK
+195    wrap  uid:50000  1     3m0s     0     0      0.0/15G (0%)  0.1           idle:medium  -       0    -
+
+JOBID  NAME  SEVERITY  RULE                         FINDING
+195    wrap  warn      blocking-idle-allocation     its 1 GPU has done no work, while 1 job waits for 1 GPU
+195    wrap  warn      gpu-requested-never-touched  holds 1 GPU and none has done any work in 3m0s - the job may not be able to see them at all
+```
+
+**It reports two facts measured at the same instant, not a causal chain.** The sentence looks like an accusation that job 195 is blocking a specific waiting job. It is not. Deciding which pending job would have landed where depends on partitions, features, memory, topology and priority — that is Slurm's decision, and Squire does not make it. What it can say is that idle devices and unmet demand exist right now, which is the fact somebody needs in order to go and look.
+
+**It clears itself.** Cancel the waiting job and the finding disappears while `gpu-requested-never-touched` stays. The allocation is exactly as idle; it is simply not costing anybody anything. Expect that behaviour rather than reporting it as a flapping alert.
+
+**Only jobs waiting on `Resources` count.** A job held by priority, a dependency, an administrator or a licence would not start if every GPU on the cluster went free this second. Counting those would report pressure that is not there.
+
+**On a site that sets `PrivateData=jobs`**, a token sees only its owner's jobs, so the pending count falls to whatever that token can see. The finding gets quieter, never wrong.
+
 **When these stay silent**, which matters as much as when they fire:
 
 - **Inside the grace period.** A job that has just started has not had the chance to waste anything.
 - **Without per-device telemetry.** If the numbers cover every GPU on the job's nodes rather than the ones it holds, a neighbour's work could exonerate it or a neighbour's idleness could condemn it. Either way the finding would name the wrong person.
 - **Without the measurement.** An unread device count is never treated as zero. In `--wide` a dash means "not measured"; `0` means "measured, and nothing was lit".
+- **With nobody waiting**, for `blocking-idle-allocation` alone. The other three do not care what the queue is doing.
 
 ---
 
@@ -354,8 +381,12 @@ Nothing reachable from `squire-lint` imports Kubernetes or Prometheus, so neithe
 | `squire_job_gpus_held` | gauge | GPU devices allocated to the job. |
 | `squire_job_gpus_lit` | gauge | Devices that have done work at some point in the run. |
 | `squire_job_zombie` | gauge | Kept for compatibility; derived from `squire_job_activity`. |
+| `squire_pending_gpu_jobs` | gauge | Jobs waiting because the cluster is short of GPUs. No job labels. |
+| `squire_pending_gpus` | gauge | Devices those waiting jobs are asking for. No job labels. |
 
 `squire_job_gpus_lit` is emitted **only when measured**. A Prometheus series cannot say "unknown", so an unread count is left out entirely rather than published as `0` — a dashboard averaging it would otherwise show idle devices that were never measured. Compare it against `squire_job_gpus_held` for the same job; the gap is the idle allocation.
+
+The two `squire_pending_*` series carry no job labels, because queue pressure is a fact about the cluster rather than about any one job. Both are **always emitted, including zero** — a dashboard has to be able to tell "nobody is waiting" from "Squire is not running", and only one of those is worth an alert.
 
 ## Design principles
 
