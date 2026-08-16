@@ -103,6 +103,43 @@ func TestBlockingIdleNeedsBothHalves(t *testing.T) {
 	}
 }
 
+// TestBlockingIdleWordsTheFraction: a live run produced "1 of its 1 GPU has
+// done no work" next to a finding saying the same thing more plainly. Name a
+// fraction only when the allocation is partly used.
+func TestBlockingIdleWordsTheFraction(t *testing.T) {
+	whole := live()
+	whole.GPUsRequested, whole.LitGPUs = 1, 0
+	m := findingMessage(t, Check(whole, Queue{PendingGPUJobs: 1, PendingGPUs: 1}), "blocking-idle-allocation")
+	if strings.Contains(m, "1 of its 1") {
+		t.Errorf("a wholly idle allocation is not a fraction: %s", m)
+	}
+	if !strings.Contains(m, "its 1 GPU has done no work") {
+		t.Errorf("unexpected wording: %s", m)
+	}
+
+	part := live()
+	part.LitGPUs = 1 // holds four, lit one
+	m = findingMessage(t, Check(part, Queue{PendingGPUJobs: 2, PendingGPUs: 9}), "blocking-idle-allocation")
+	if !strings.Contains(m, "3 of its 4 GPUs have done no work") {
+		t.Errorf("a partly used allocation names the fraction: %s", m)
+	}
+	if !strings.Contains(m, "2 jobs wait for 9 GPUs") {
+		t.Errorf("queue numbers wrong: %s", m)
+	}
+}
+
+func findingMessage(t *testing.T, fs []lint.Finding, rule string) string {
+	t.Helper()
+	for _, f := range fs {
+		if f.Rule == rule {
+			t.Logf("%s", f.Message)
+			return f.Message
+		}
+	}
+	t.Fatalf("%s did not fire: %v", rule, rules(fs))
+	return ""
+}
+
 // TestBlockingIdleNamesNoVictim: deciding which waiting job would have landed
 // on this node is the scheduler's work. The message reports coincidence in
 // time, never a causal chain, so it must not name another job.

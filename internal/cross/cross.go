@@ -88,9 +88,16 @@ func blockingIdle(j Job, q Queue, add func(lint.Finding)) {
 	if idle <= 0 {
 		return
 	}
+	// "1 of its 1 GPU" is what a fraction reads like when the whole
+	// allocation is idle, and it restates the finding printed beside it.
+	// Name the fraction only when there is one.
+	held := fmt.Sprintf("its %d %s", j.GPUsRequested, plural(j.GPUsRequested))
+	if idle < j.GPUsRequested {
+		held = fmt.Sprintf("%d of its %d %s", idle, j.GPUsRequested, plural(j.GPUsRequested))
+	}
 	add(lint.Finding{JobID: j.ID, Rule: "blocking-idle-allocation", Severity: lint.Warn,
-		Message: fmt.Sprintf("%d of its %d %s %s done no work, while %d %s %s for %d %s",
-			idle, j.GPUsRequested, plural(j.GPUsRequested), pick(idle, "has", "have"),
+		Message: fmt.Sprintf("%s %s done no work, while %d %s %s for %d %s",
+			held, pick(idle, "has", "have"),
 			q.PendingGPUJobs, pick(q.PendingGPUJobs, "job", "jobs"),
 			pick(q.PendingGPUJobs, "waits", "wait"),
 			q.PendingGPUs, plural(q.PendingGPUs))})
