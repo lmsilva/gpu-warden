@@ -10,6 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
@@ -19,13 +20,80 @@ type Client struct {
 	nodeLabel string // pod label carrying the Slurm node name; "" means default
 }
 
-func NewClient(kubeconfig, namespace, nodeLabel string) (*Client, error) {
-	if kubeconfig == "" {
-		kubeconfig = filepath.Join(os.Getenv("HOME"), ".kube", "config")
+// credSource names where Kubernetes credentials come from. The decision is
+// separated from the loading so it can be tested with no cluster, no
+// environment and no file on disk.
+type credSource int
+
+const (
+	// credInCluster uses the ServiceAccount token Kubernetes mounts into
+	// every pod.
+	credInCluster credSource = iota
+	// credKubeconfig uses an explicitly named kubeconfig.
+	credKubeconfig
+	// credHomeKubeconfig uses ~/.kube/config, the laptop case.
+	credHomeKubeconfig
+)
+
+// inPod reports whether this process is running inside Kubernetes.
+//
+// It reads the same two variables rest.InClusterConfig reads, so it detects
+// exactly the condition that function can serve. One without the other is a
+// misconfigured shell rather than a pod, and is treated as not-a-pod.
+func inPod() bool {
+	return os.Getenv("KUBERNETES_SERVICE_HOST") != "" &&
+		os.Getenv("KUBERNETES_SERVICE_PORT") != ""
+}
+
+// pickCredSource orders the decision explicitly.
+//
+// An explicit kubeconfig wins even inside a pod, because that is how an
+// in-cluster Squire is pointed at a different cluster. Otherwise a pod uses
+// its own ServiceAccount, and everything else falls back to the home
+// kubeconfig.
+//
+// The order matters more than it looks: clientcmd.BuildConfigFromFlags only
+// falls back to the in-cluster config when the path it receives is EMPTY, so
+// filling in ~/.kube/config first - as this used to - means a pod never
+// reaches its ServiceAccount and dies on a file that was never going to exist.
+func pickCredSource(kubeconfig string, inPod bool) credSource {
+	switch {
+	case kubeconfig != "":
+		return credKubeconfig
+	case inPod:
+		return credInCluster
+	default:
+		return credHomeKubeconfig
+	}
+}
+
+// loadConfig turns a decision into a client configuration.
+func loadConfig(src credSource, kubeconfig string) (*rest.Config, error) {
+	switch src {
+	case credInCluster:
+		cfg, err := rest.InClusterConfig()
+		if err != nil {
+			return nil, fmt.Errorf("reading the pod service account: %w", err)
+		}
+		return cfg, nil
+	case credHomeKubeconfig:
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, fmt.Errorf("no kubeconfig given and no home directory to look in: %w", err)
+		}
+		kubeconfig = filepath.Join(home, ".kube", "config")
 	}
 	cfg, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
 	if err != nil {
-		return nil, fmt.Errorf("loading kubeconfig: %w", err)
+		return nil, fmt.Errorf("loading kubeconfig %s: %w", kubeconfig, err)
+	}
+	return cfg, nil
+}
+
+func NewClient(kubeconfig, namespace, nodeLabel string) (*Client, error) {
+	cfg, err := loadConfig(pickCredSource(kubeconfig, inPod()), kubeconfig)
+	if err != nil {
+		return nil, err
 	}
 	cs, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
