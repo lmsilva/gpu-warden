@@ -92,6 +92,12 @@ spec:
           #
           # Tags are published by the release workflow: a semver tag for what
           # you deploy, and a sha- tag for identifying a rebuild.
+          #
+          # Applying this from an unreleased branch gives ImagePullBackOff
+          # with "not found", which reads like an authentication failure and
+          # is not one. Point it at the branch build instead:
+          #   kubectl -n slurm set image deploy/squire \
+          #     squire=ghcr.io/lmsilva/squire:dev
           image: ghcr.io/lmsilva/squire:v0.1.0
           args:
             - --serve=:9101
