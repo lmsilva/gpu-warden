@@ -17,6 +17,10 @@ import (
 // put thresholds, Prometheus and Kubernetes settings in this mode's help, none
 // of which it reads - and a flag a mode ignores is worse than a missing one,
 // because it looks like it works.
+//
+// The list is exact rather than a minimum, so adding a flag to the shared
+// binder for the monitoring path's benefit fails here and has to be a
+// decision rather than an accident.
 func TestFlagsAreCheckOnly(t *testing.T) {
 	fs := flag.NewFlagSet("check", flag.ContinueOnError)
 	var c slurmcfg.Config
@@ -24,7 +28,7 @@ func TestFlagsAreCheckOnly(t *testing.T) {
 
 	var got []string
 	fs.VisitAll(func(f *flag.Flag) { got = append(got, f.Name) })
-	want := map[string]bool{"slurm-url": true, "slurm-api": true}
+	want := map[string]bool{"slurm-url": true, "slurm-api": true, "slurm-token-file": true}
 	for _, name := range got {
 		if !want[name] {
 			t.Errorf("the check registers %q, which it does not read", name)
@@ -238,7 +242,7 @@ func fakeSlurm(t *testing.T, jobs, nodes, parts string) *slurmapi.Client {
 		w.Write([]byte(b))
 	}))
 	t.Cleanup(srv.Close)
-	return slurmapi.NewClient(srv.URL, "v0.0.44", "token")
+	return slurmapi.NewClient(srv.URL, "v0.0.44", slurmapi.StaticToken("token"))
 }
 
 const (

@@ -158,12 +158,28 @@ type partitionsResponse struct {
 	Partitions []Partition `json:"partitions"`
 }
 
-type Client struct {
-	base, apiVer, token string
-	http                *http.Client
+// TokenSource returns the bearer token for one request.
+//
+// A function rather than a string because a long-running process cannot have
+// its environment changed from outside: a token read once at startup expires
+// and every later call fails with 511, and re-minting in another shell cannot
+// reach it. A file-backed source is re-read per request, so a rotated secret
+// takes effect without a restart.
+type TokenSource func() (string, error)
+
+// StaticToken is a TokenSource for a token that will not change, which is the
+// normal case for a one-shot command.
+func StaticToken(tok string) TokenSource {
+	return func() (string, error) { return tok, nil }
 }
 
-func NewClient(base, apiVer, token string) *Client {
+type Client struct {
+	base, apiVer string
+	token        TokenSource
+	http         *http.Client
+}
+
+func NewClient(base, apiVer string, token TokenSource) *Client {
 	return &Client{base: base, apiVer: apiVer, token: token,
 		http: &http.Client{Timeout: 15 * time.Second}}
 }
@@ -176,7 +192,11 @@ func (c *Client) get(ctx context.Context, path string, out any) error {
 	if err != nil {
 		return fmt.Errorf("building %s request: %w", path, err)
 	}
-	req.Header.Set("X-SLURM-USER-TOKEN", c.token)
+	tok, err := c.token()
+	if err != nil {
+		return fmt.Errorf("reading Slurm token: %w", err)
+	}
+	req.Header.Set("X-SLURM-USER-TOKEN", tok)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return fmt.Errorf("calling slurmrestd: %w", err)
