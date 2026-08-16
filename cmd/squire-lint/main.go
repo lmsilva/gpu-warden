@@ -8,11 +8,17 @@
 package main
 
 import (
+	"fmt"
 	"os"
 
+	"github.com/lmsilva/squire/internal/buildinfo"
 	"github.com/lmsilva/squire/internal/lintcli"
 )
 
 func main() {
+	if buildinfo.Asked(os.Args[1:]) {
+		fmt.Println(buildinfo.String("squire-lint"))
+		return
+	}
 	os.Exit(lintcli.Main("squire-lint", os.Args[1:]))
 }

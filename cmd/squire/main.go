@@ -15,6 +15,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/lmsilva/squire/internal/buildinfo"
 	"github.com/lmsilva/squire/internal/cross"
 	"github.com/lmsilva/squire/internal/expose"
 	"github.com/lmsilva/squire/internal/kube"
@@ -144,6 +145,13 @@ func parseConfig(args []string) config {
 }
 
 func main() {
+	// Answered before anything is parsed or built: a binary that cannot start
+	// should still be able to say what it is.
+	if buildinfo.Asked(os.Args[1:]) {
+		fmt.Println(buildinfo.String("squire"))
+		return
+	}
+
 	c := parseConfig(os.Args[1:])
 
 	sc := slurmapi.NewClient(c.URL, c.Version, c.Token)
