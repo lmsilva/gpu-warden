@@ -7,6 +7,9 @@
 #
 # Either way the version the binaries report comes from here, which is what
 # makes a bug report traceable back to a commit.
+# Action majors are pinned to the newest that declares runs.using: node24.
+# GitHub removes Node 20 from the runners in September 2026; most of these
+# majors were cut for that migration and carry no behavioural change.
 name: release
 
 on:
@@ -26,20 +29,20 @@ jobs:
   image:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Build the binaries the same way locally and here, so a failure in CI
       # is a real failure rather than an environment difference.
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       - run: gofmt -l . | tee /dev/stderr | wc -l | grep -qx 0
       - run: go vet ./...
       - run: go test -race ./...
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         if: github.event_name == 'push'
         with:
           registry: ghcr.io
@@ -50,7 +53,7 @@ jobs:
       # deploy; the commit is what identifies a build when a version is
       # rebuilt.
       - id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
@@ -58,7 +61,7 @@ jobs:
             type=ref,event=branch
             type=sha,format=long
 
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         with:
           context: .
           # amd64 and arm64, matching what SlinkyProject publishes. arm64 is
@@ -85,8 +88,8 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
@@ -107,7 +110,7 @@ jobs:
           # transport.
           cd dist && sha256sum * > SHA256SUMS
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: dist/*
           # The release body is this version's section of the changelog,
