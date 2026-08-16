@@ -1,0 +1,116 @@
+# Build and publish the container image.
+#
+# Two kinds of build. A version tag makes a release: an image somebody decided
+# to cut, with binaries and a changelog entry. A push to the working branch
+# publishes a :dev image so work in progress can be deployed and tested
+# without inventing a version number for it.
+#
+# Either way the version the binaries report comes from here, which is what
+# makes a bug report traceable back to a commit.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+    branches: ["dev"]
+  # Manual runs are for testing the workflow itself; they publish nothing.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # Required to push to ghcr.io under this repository's namespace. No secret
+  # is needed beyond the token GitHub provides.
+  packages: write
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Build the binaries the same way locally and here, so a failure in CI
+      # is a real failure rather than an environment difference.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: gofmt -l . | tee /dev/stderr | wc -l | grep -qx 0
+      - run: go vet ./...
+      - run: go test -race ./...
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        if: github.event_name == 'push'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Tag with the version and with the commit. The version is what people
+      # deploy; the commit is what identifies a build when a version is
+      # rebuilt.
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=ref,event=branch
+            type=sha,format=long
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          # amd64 and arm64, matching what SlinkyProject publishes. arm64 is
+          # not theoretical for GPU clusters - Grace-class and AWS G5g nodes
+          # are aarch64, and Slinky has been run on them.
+          platforms: linux/amd64,linux/arm64
+          # Only a tag publishes. A manual run builds and throws it away,
+          # which is how the workflow itself gets tested.
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
+
+  # Plain binaries alongside the image. squire-lint's whole argument is that
+  # it needs nothing installed, and telling somebody to pull a container to
+  # try it gives that away. Same two architectures as the image.
+  #
+  # Releases only: a branch build publishes an image to test with, not a
+  # download anybody should be keeping.
+  binaries:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: build
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          mkdir -p dist
+          for pair in linux/amd64 linux/arm64; do
+            os=${pair%/*}; arch=${pair#*/}
+            for cmd in squire squire-lint; do
+              CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath \
+                -ldflags="-s -w -X github.com/lmsilva/squire/internal/buildinfo.Version=${VERSION}" \
+                -o "dist/${cmd}-${os}-${arch}" "./cmd/${cmd}"
+            done
+          done
+          # Checksums, so a download can be verified without trusting the
+          # transport.
+          cd dist && sha256sum * > SHA256SUMS
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          # The release body is this version's section of the changelog,
+          # written once and read from the repository rather than composed
+          # twice.
+          body_path: CHANGELOG.md
