@@ -8,10 +8,10 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
-	"sync"
 	"syscall"
 	"time"
 
+	"github.com/lmsilva/squire/internal/act"
 	"github.com/lmsilva/squire/internal/buildinfo"
 	"github.com/lmsilva/squire/internal/cycle"
 	"github.com/lmsilva/squire/internal/expose"
@@ -169,7 +169,7 @@ func main() {
 	}
 
 	// One event log for the process lifetime, shared by every cycle.
-	ev := newEventLog()
+	ev := act.NewLog()
 
 	// Every mode reads through the same source, so the table and the
 	// exporter can only ever differ in how they render what it returned.
@@ -270,85 +270,15 @@ func main() {
 // runCycle runs one pass and, when --act is set, emits Events. Both output
 // modes go through this single function, which is what lets --serve and --act
 // compose without duplicating the decision logic.
-func runCycle(ctx context.Context, b *report.Builder, kc *kube.Client, c config, ev *eventLog) (cycle.Snapshot, error) {
+func runCycle(ctx context.Context, b *report.Builder, kc *kube.Client, c config, ev *act.Log) (cycle.Snapshot, error) {
 	s, err := cycle.Build(ctx, b, c.th.GraceCeiling)
 	if err != nil {
 		return cycle.Snapshot{}, err
 	}
 	if c.act {
-		if err := actOnZombies(ctx, kc, s.Reports, c.th.IdleWindow, ev); err != nil {
+		if err := act.OnZombies(ctx, kc, s.Reports, c.th.IdleWindow, ev); err != nil {
 			return s, fmt.Errorf("acting on zombies: %w", err)
 		}
 	}
 	return s, nil
-}
-
-// eventLog remembers when each job was last Evented, so a job is not
-// re-stamped every cycle. The mutex is required because --serve runs
-// actOnZombies inside an HTTP handler, and net/http runs handlers
-// concurrently: a bare map here would crash the process.
-type eventLog struct {
-	mu   sync.Mutex
-	seen map[int]time.Time
-}
-
-func newEventLog() *eventLog {
-	return &eventLog{seen: make(map[int]time.Time)}
-}
-
-// claim reports whether this job should be Evented now, and records the
-// attempt if so. One method rather than a separate check and record: split
-// in two, both scrapes could pass the check and both emit for one job.
-//
-// It records before the Event is created, so a failed emit consumes the
-// window. At-most-once is the safer direction for a cluster write.
-func (e *eventLog) claim(jobID int, win time.Duration) bool {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if last, ok := e.seen[jobID]; ok && time.Since(last) < win {
-		return false
-	}
-	e.seen[jobID] = time.Now()
-	return true
-}
-
-// actOnZombies emits one Kubernetes Event per zombie job, on the worker pod
-// holding its first allocated node.
-func actOnZombies(ctx context.Context, kc *kube.Client, reports []report.JobReport, win time.Duration, ev *eventLog) error {
-	nodes, err := kc.NodeMap(ctx)
-	if err != nil {
-		return fmt.Errorf("resolving pods for events: %w", err)
-	}
-	for _, r := range reports {
-		if !r.IsZombie() {
-			continue
-		}
-		slurmNodes, err := slurmapi.ExpandNodes(r.Job.Nodes)
-		if err != nil || len(slurmNodes) == 0 {
-			fmt.Printf("job %d: cannot expand nodes %q, skipping event\n", r.Job.JobID, r.Job.Nodes)
-			continue
-		}
-		// Slurm node name -> pod. A node missing from the map is a worker
-		// mid-restart: skip and say so, rather than crashing a monitoring tool.
-		pod, ok := nodes[slurmNodes[0]]
-		if !ok {
-			fmt.Printf("job %d: no pod for slurm node %q, skipping event\n", r.Job.JobID, slurmNodes[0])
-			continue
-		}
-		// Claimed after the pod is resolved, not at the top of the loop: the
-		// skips above are transient, and claiming first would silence the job
-		// for a whole window without ever having tried.
-		if !ev.claim(r.Job.JobID, win) {
-			continue // already warned about this job within the window
-		}
-		// The Event now carries the verdict's own words: its confidence and the
-		// evidence line. Someone reading `kubectl describe pod` gets the
-		// reasoning, not just an accusation.
-		detail := fmt.Sprintf("confidence %s: %s", r.Verdict.Confidence, r.Verdict.Reason())
-		if err := kc.EmitZombieEvent(ctx, &pod, r.Job.JobID, r.Job.Owner(), detail); err != nil {
-			return err
-		}
-		fmt.Printf("event emitted on %s for job %d\n", pod.Name, r.Job.JobID)
-	}
-	return nil
 }
