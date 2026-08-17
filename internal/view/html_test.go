@@ -83,6 +83,11 @@ func TestHTMLEmptyCluster(t *testing.T) {
 	if strings.Contains(out, "<tbody>") {
 		t.Errorf("no jobs must mean no table:\n%s", out)
 	}
+	// And it must say which jobs it means. A cluster busy with CPU work
+	// would otherwise read this as Squire having lost track of everything.
+	if !strings.Contains(out, "CPU-only jobs are not shown") {
+		t.Errorf("the empty state must name what it excludes:\n%s", out)
+	}
 }
 
 // TestHTMLQueueIsStatedEitherWay covers both halves: a reader has to be able
@@ -156,5 +161,32 @@ func TestHTMLShowsTheBuildTime(t *testing.T) {
 	// A snapshot nothing stamped says nothing, rather than 1970.
 	if out := render(t, cycle.Snapshot{}, HTMLOptions{}); strings.Contains(out, "as of") {
 		t.Errorf("an unstamped snapshot must not claim a time:\n%s", out)
+	}
+}
+
+// TestHTMLFooterCarriesTheVersion. The footer is what a screenshot or a
+// pasted bug report carries, so the build that produced the page has to be
+// on it - and nothing else does.
+func TestHTMLFooterCarriesTheVersion(t *testing.T) {
+	out := render(t, cycle.Snapshot{}, HTMLOptions{Version: "v0.1.0"})
+	if !strings.Contains(out, "<footer>squire v0.1.0</footer>") {
+		t.Errorf("want the version alone in the footer:\n%s", out)
+	}
+}
+
+// TestHTMLColoursAreNamedOnce guards the readability fix. Every colour is
+// declared once as a variable, with a dark-background override; a hex literal
+// in an ordinary rule is one that was chosen against one background and will
+// be unreadable on the other.
+func TestHTMLColoursAreNamedOnce(t *testing.T) {
+	out := render(t, cycle.Snapshot{}, HTMLOptions{})
+	if !strings.Contains(out, "prefers-color-scheme: dark") {
+		t.Error("the page must define its colours for a dark background too")
+	}
+	style := out[strings.Index(out, "<style>"):strings.Index(out, "</style>")]
+	for _, line := range strings.Split(style, "\n") {
+		if strings.Contains(line, "#") && !strings.Contains(line, "--") {
+			t.Errorf("colour literal outside the variable block: %s", strings.TrimSpace(line))
+		}
 	}
 }

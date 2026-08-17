@@ -60,29 +60,53 @@ var pageTmpl = template.Must(template.New("page").Parse(`<!DOCTYPE html>
 {{if .Refresh}}<meta http-equiv="refresh" content="{{.Refresh}}">{{end}}
 <title>squire</title>
 <style>
-:root { color-scheme: light dark; }
+/* Colours are named once and redefined for a dark background, rather than
+   picked to sit somewhere between the two. A mid grey that survives both is
+   a mid grey that is hard to read on either. */
+:root {
+  color-scheme: light dark;
+  --fg: #111;
+  --muted: #55595e;
+  --line: #d8dade;
+  --zombie: #b3261e;
+  --idle: #8a5300;
+  --healthy: #146c2e;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fg: #e9eaec;
+    --muted: #a9adb3;
+    --line: #3a3d42;
+    --zombie: #ff8a80;
+    --idle: #ffc046;
+    --healthy: #6ee7a0;
+  }
+}
 body { font: 14px/1.5 ui-sans-serif, system-ui, sans-serif; margin: 2rem auto;
-       max-width: 90rem; padding: 0 1rem; }
+       max-width: 90rem; padding: 0 1rem; color: var(--fg); }
 h1 { font-size: 1.25rem; margin: 0; }
 h2 { font-size: 1rem; margin: 2rem 0 .5rem; }
-.meta { color: #666; margin: .25rem 0 1.5rem; }
+.meta { color: var(--muted); margin: .25rem 0 1.5rem; }
 table { border-collapse: collapse; width: 100%; }
-th, td { text-align: left; padding: .35rem .6rem; border-bottom: 1px solid #ddd;
+th, td { text-align: left; padding: .35rem .6rem; border-bottom: 1px solid var(--line);
          white-space: nowrap; }
 th { font-weight: 600; font-size: .8rem; text-transform: uppercase;
-     letter-spacing: .03em; color: #666; }
+     letter-spacing: .03em; color: var(--muted); }
 td.num { text-align: right; font-variant-numeric: tabular-nums; }
-tr.why td { border-bottom: 1px solid #ddd; padding-top: 0; color: #666;
+/* The evidence line is secondary to its row but still has to be readable -
+   it is the part that explains the verdict, so it gets the body colour at a
+   smaller size rather than a lighter grey. */
+tr.why td { border-bottom: 1px solid var(--line); padding-top: 0;
             white-space: normal; font-size: .9rem; }
 tr.why + tr td { border-top: 0; }
-.state-zombie { color: #b00020; font-weight: 600; }
-.state-idle { color: #9a6700; font-weight: 600; }
-.state-healthy { color: #1a7f37; }
-.state-analyzing { color: #666; }
-.sev-warn { color: #b00020; font-weight: 600; }
-.sev-note { color: #9a6700; }
-.note { color: #666; margin: 1rem 0; }
-footer { color: #666; margin-top: 2.5rem; font-size: .85rem; }
+.state-zombie { color: var(--zombie); font-weight: 600; }
+.state-idle { color: var(--idle); font-weight: 600; }
+.state-healthy { color: var(--healthy); }
+.state-analyzing { color: var(--muted); }
+.sev-warn { color: var(--zombie); font-weight: 600; }
+.sev-note { color: var(--idle); }
+.note { margin: 1rem 0; }
+footer { color: var(--muted); margin-top: 2.5rem; font-size: .85rem; }
 </style>
 </head>
 <body>
@@ -112,6 +136,7 @@ footer { color: #666; margin-top: 2.5rem; font-size: .85rem; }
 </table>
 {{else}}
 <p>No GPU jobs are running.</p>
+<p class="meta">CPU-only jobs are not shown here — Squire reports what GPUs are doing, and a job holding no GPU has nothing for it to measure. <code>squire-lint</code> checks those.</p>
 {{end}}
 
 {{if .PodWide}}<p class="note">{{.PodWide}}</p>{{end}}
@@ -133,12 +158,20 @@ footer { color: #666; margin-top: 2.5rem; font-size: .85rem; }
 </table>
 {{end}}
 
-<footer>squire {{.Version}} &middot; read-only &middot; this page is not authenticated</footer>
+<footer>squire {{.Version}}</footer>
 </body>
 </html>
 `))
 
 // HTML renders a pass as a web page.
+//
+// The empty cluster is the one place this deliberately says more than the
+// terminal table does. A table with a header and no rows reads correctly in a
+// shell; the same thing in a browser reads as a Squire that has lost its
+// jobs. So the page says it in words - and says which jobs it is talking
+// about, because "nothing is running" is confusing to somebody looking at a
+// queue full of CPU work. The two presenters agree on every job; they differ
+// on how to render the absence of any.
 //
 // It builds the whole document before writing a byte of it. A template that
 // fails halfway through would otherwise leave a 200 already sent and half a
