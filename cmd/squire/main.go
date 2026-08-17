@@ -72,6 +72,22 @@ func pageRefresh(serveCache time.Duration) time.Duration {
 	return serveCache
 }
 
+// ignoredFlagNote returns the note to print when a flag was named in a mode
+// that does not read it, or "" when nothing was ignored.
+//
+// Both directions, in one place. A flag that is silently ignored is worse
+// than one that is rejected: the run succeeds, the output looks right, and
+// the setting the operator asked for is simply absent.
+func ignoredFlagNote(serving, serveCacheSet bool, watch time.Duration) string {
+	switch {
+	case serving && watch > 0:
+		return "note: --watch is ignored with --serve; Prometheus sets the cadence"
+	case !serving && serveCacheSet:
+		return "note: --serve-cache is ignored without --serve; a one-shot or --watch run builds every cycle"
+	}
+	return ""
+}
+
 type config struct {
 	// Config carries the Slurm connection settings, bound from the same
 	// place the configuration check binds them so the two cannot drift.
@@ -82,10 +98,14 @@ type config struct {
 	namespace  string
 	serveAddr  string
 	serveCache time.Duration
-	watch      time.Duration
-	act        bool
-	dollarRate float64
-	wide       bool
+	// serveCacheSet records that --serve-cache was named on the command
+	// line. A zero value is a legitimate setting, so the value alone cannot
+	// say whether the operator asked for it.
+	serveCacheSet bool
+	watch         time.Duration
+	act           bool
+	dollarRate    float64
+	wide          bool
 
 	// th holds the verdict thresholds. They are a single struct rather than
 	// loose fields so the whole opinion travels together into the Builder
@@ -151,6 +171,13 @@ func parseConfig(args []string) config {
 		os.Exit(2)
 	}
 
+	// Which flags were actually named, as opposed to left at their default.
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "serve-cache" {
+			c.serveCacheSet = true
+		}
+	})
+
 	c.th.BurstMemFrac = def.BurstMemFrac
 	c.th.UnderUtilPct = def.UnderUtilPct
 	c.th.UnderMemFrac = def.UnderMemFrac
@@ -193,11 +220,12 @@ func main() {
 		return runCycle(ctx, b, kc, c, ev)
 	})
 
+	if note := ignoredFlagNote(c.serveAddr != "", c.serveCacheSet, c.watch); note != "" {
+		fmt.Println(note)
+	}
+
 	// --serve turns Squire into an exporter.
 	if c.serveAddr != "" {
-		if c.watch > 0 {
-			fmt.Println("note: --watch is ignored with --serve; Prometheus sets the cadence")
-		}
 		// Only the served path is cached. A --watch run asks on its own
 		// cadence and a one-shot run asks once, so neither can amplify -
 		// and a cache there would hand back numbers older than the

@@ -36,3 +36,73 @@ func TestScrapeBudget(t *testing.T) {
 		})
 	}
 }
+
+// TestPageRefresh pins the cadence the page reloads itself on. It follows the
+// cache so a reload costs nothing extra, and never drops below the floor -
+// with the cache off, following it exactly would mean a full fan-out per
+// reload per browser.
+func TestPageRefresh(t *testing.T) {
+	cases := []struct {
+		name  string
+		cache time.Duration
+		want  time.Duration
+	}{
+		{"default cache", 30 * time.Second, 30 * time.Second},
+		{"long cache", 5 * time.Minute, 5 * time.Minute},
+		{"short cache", 5 * time.Second, minPageRefresh},
+		{"cache disabled", 0, minPageRefresh},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := pageRefresh(tc.cache); got != tc.want {
+				t.Errorf("cache %v: want %v, got %v", tc.cache, tc.want, got)
+			}
+		})
+	}
+}
+
+// TestIgnoredFlagNote pins both directions. A flag that is silently ignored
+// is worse than one that is rejected: the run succeeds, the output looks
+// right, and the setting the operator asked for is simply absent.
+func TestIgnoredFlagNote(t *testing.T) {
+	cases := []struct {
+		name          string
+		serving       bool
+		serveCacheSet bool
+		watch         time.Duration
+		want          string
+	}{
+		{"serving, nothing ignored", true, true, 0, ""},
+		{"serving with a watch interval", true, false, 30 * time.Second,
+			"note: --watch is ignored with --serve; Prometheus sets the cadence"},
+		{"one-shot with a cache setting", false, true, 0,
+			"note: --serve-cache is ignored without --serve; a one-shot or --watch run builds every cycle"},
+		{"watch mode with a cache setting", false, true, 30 * time.Second,
+			"note: --serve-cache is ignored without --serve; a one-shot or --watch run builds every cycle"},
+		// The default is not a request. Only a flag actually named counts,
+		// which is why the value alone cannot answer this.
+		{"one-shot, cache left alone", false, false, 0, ""},
+		{"watch mode, cache left alone", false, false, 30 * time.Second, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ignoredFlagNote(tc.serving, tc.serveCacheSet, tc.watch); got != tc.want {
+				t.Errorf("want %q, got %q", tc.want, got)
+			}
+		})
+	}
+}
+
+// TestServeCacheSetOnlyWhenNamed covers the parse half: a --serve-cache equal
+// to the default is still a request, and no flag at all is not.
+func TestServeCacheSetOnlyWhenNamed(t *testing.T) {
+	if parseConfig([]string{}).serveCacheSet {
+		t.Error("an unnamed flag must not read as set")
+	}
+	if !parseConfig([]string{"--serve-cache", "30s"}).serveCacheSet {
+		t.Error("naming the flag at its default value is still naming it")
+	}
+	if !parseConfig([]string{"--serve-cache", "0"}).serveCacheSet {
+		t.Error("a zero value is a legitimate setting and must read as set")
+	}
+}
