@@ -4,15 +4,12 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
-	"strings"
 	"sync"
 	"syscall"
-	"text/tabwriter"
 	"time"
 
 	"github.com/lmsilva/squire/internal/buildinfo"
@@ -24,6 +21,7 @@ import (
 	"github.com/lmsilva/squire/internal/slurmapi"
 	"github.com/lmsilva/squire/internal/slurmcfg"
 	"github.com/lmsilva/squire/internal/verdict"
+	"github.com/lmsilva/squire/internal/view"
 )
 
 // cycleTimeout bounds one build of the reports, in either mode. The server's
@@ -252,8 +250,9 @@ func main() {
 			if c.watch > 0 {
 				fmt.Printf("\n=== %s ===\n", time.Now().Format("15:04:05"))
 			}
-			printTable(os.Stdout, got.Reports, c)
-			printFindings(os.Stdout, got)
+			view.Table(os.Stdout, got, view.TableOptions{
+				Wide: c.wide, DollarRate: c.dollarRate,
+			})
 		}
 
 		if c.watch == 0 {
@@ -282,109 +281,6 @@ func runCycle(ctx context.Context, b *report.Builder, kc *kube.Client, c config,
 		}
 	}
 	return s, nil
-}
-
-// printFindings writes the findings under the verdict table.
-//
-// A separate block rather than more columns: the table answers "what is every
-// job doing", one row each, and findings are exceptions that most jobs do not
-// have. Widening every row for something few of them carry would cost the
-// table its shape. The columns match squire-lint's, so a reader who has seen
-// one recognises the other.
-func printFindings(out io.Writer, s cycle.Snapshot) {
-	if len(s.Findings) == 0 {
-		return
-	}
-	names := s.Names()
-	fmt.Fprintln(out)
-	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "JOBID\tNAME\tSEVERITY\tRULE\tFINDING")
-	for _, f := range s.Findings {
-		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\n",
-			f.JobID, names[f.JobID], f.Severity, f.Rule, f.Message)
-	}
-	w.Flush()
-}
-
-func printTable(out io.Writer, reports []report.JobReport, c config) {
-	// tabwriter buffers: nothing prints until Flush.
-	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-	anyPodWide := false
-	engineFaulted := false
-	header := "JOBID\tNAME\tUSER\tGPUS\tELAPSED\tAVG%\tPEAK%\tGPU-MEM\tWASTED-GPU-H\tACTIVITY\tSIZING"
-	if c.wide {
-		// LIT and FIRST-WORK are measurements rather than judgements, which
-		// is why they sit with the evidence rather than in the default table.
-		// Without them the findings below can only be trusted, not checked.
-		header += "\tLIT\tFIRST-WORK\tWHY"
-	}
-	fmt.Fprintln(w, header)
-	for _, r := range reports {
-		v := r.Verdict
-		// Activity carries its confidence inline ("zombie:high"); a verdict
-		// without one (analyzing) prints bare.
-		activity := v.Activity.String()
-		if v.Confidence != verdict.ConfNone {
-			activity += ":" + v.Confidence.String()
-		}
-		sizing := "-"
-		if v.Sizing != verdict.SizingUnknown {
-			sizing = v.Sizing.String()
-		}
-		mem := "-"
-		if r.CapacityMiB > 0 {
-			mem = fmt.Sprintf("%.1f/%.0fG (%.0f%%)",
-				r.PeakMemMiB/1024, r.CapacityMiB/1024, r.PeakMemFrac*100)
-		}
-		cost := fmt.Sprintf("%.1f", r.WastedH)
-		if c.dollarRate > 0 {
-			cost = fmt.Sprintf("%.1f ($%.2f)", r.WastedH, r.WastedH*c.dollarRate)
-		}
-		// A job whose telemetry could not be scoped to its own GPU devices is
-		// marked, because on a shared node those numbers include a
-		// neighbour's work. Silently printing them as if they were the job's
-		// own is the failure this column exists to prevent.
-		gpus := fmt.Sprintf("%d", r.GPUs)
-		if !r.PerGPU {
-			gpus += "*"
-			anyPodWide = true
-		}
-		if r.EngineFaulted {
-			engineFaulted = true
-		}
-		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%.0f\t%.0f\t%s\t%s\t%s\t%s",
-			r.Job.JobID, r.Job.Name, r.Job.Owner(), gpus,
-			r.Elapsed.Round(time.Minute), r.AvgUtil, r.PeakUtil, mem, cost,
-			activity, sizing)
-		if c.wide {
-			// A dash rather than a zero for both: an unmeasured signal and a
-			// measured zero mean opposite things, and a column of numbers
-			// cannot say "unknown".
-			lit := "-"
-			if r.HasLit {
-				lit = strconv.Itoa(r.LitGPUs)
-			}
-			firstWork := "-"
-			if r.HasFirstWork {
-				firstWork = r.FirstWorkAfter.Round(time.Second).String()
-			}
-			fmt.Fprintf(w, "\t%s\t%s", lit, firstWork)
-			// Every reason, not just the first. Judge appends them in
-			// priority order: what the GPU is doing, then anything that
-			// argued with it, then sizing. The first alone can assert
-			// over-provisioned and never say on what evidence.
-			fmt.Fprintf(w, "\t%s", strings.Join(v.Reasons, "; "))
-		}
-		fmt.Fprintln(w)
-	}
-	w.Flush()
-	if anyPodWide {
-		fmt.Fprintln(out, "\n* GPU indices unavailable (no gres_detail): telemetry covers every GPU on the job's nodes.")
-	}
-	if engineFaulted {
-		fmt.Fprintln(out, "\nnote: the GR_ENGINE_ACTIVE signal read flat cluster-wide while GPUs were busy,")
-		fmt.Fprintln(out, "so it was ignored this cycle. Verdicts stand; confidence is lower than it could be.")
-	}
 }
 
 // eventLog remembers when each job was last Evented, so a job is not
