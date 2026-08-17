@@ -4,14 +4,15 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/lmsilva/squire/internal/cycle"
 	"github.com/lmsilva/squire/internal/report"
 	"github.com/lmsilva/squire/internal/slurmapi"
 )
 
 func TestWriteEscapesLabels(t *testing.T) {
 	var sb strings.Builder
-	Write(&sb, []report.JobReport{{Job: slurmapi.Job{JobID: 1,
-		UserName: "evil\"} bad{", Partition: "p"}, HasData: true}}, report.Queue{})
+	Write(&sb, cycle.Snapshot{Reports: []report.JobReport{{Job: slurmapi.Job{JobID: 1,
+		UserName: "evil\"} bad{", Partition: "p"}, HasData: true}}})
 	out := sb.String()
 	if strings.Contains(out, `user="evil"`) || !strings.Contains(out, `evil\"`) {
 		t.Errorf("label value not escaped:\n%s", out)
@@ -24,7 +25,7 @@ func TestWriteEscapesLabels(t *testing.T) {
 // running", and the second is an alert while the first is good news.
 func TestQueueGaugesAlwaysEmitted(t *testing.T) {
 	var quiet strings.Builder
-	Write(&quiet, nil, report.Queue{})
+	Write(&quiet, cycle.Snapshot{})
 	for _, want := range []string{"squire_pending_gpu_jobs 0", "squire_pending_gpus 0"} {
 		if !strings.Contains(quiet.String(), want) {
 			t.Errorf("an empty queue must still publish %q", want)
@@ -33,7 +34,7 @@ func TestQueueGaugesAlwaysEmitted(t *testing.T) {
 
 	// And the two numbers must not be swapped on the way out.
 	var busy strings.Builder
-	Write(&busy, nil, report.Queue{PendingGPUJobs: 3, PendingGPUs: 11})
+	Write(&busy, cycle.Snapshot{Queue: report.Queue{PendingGPUJobs: 3, PendingGPUs: 11}})
 	if !strings.Contains(busy.String(), "squire_pending_gpu_jobs 3") ||
 		!strings.Contains(busy.String(), "squire_pending_gpus 11") {
 		t.Errorf("queue gauges transposed or missing:\n%s", busy.String())

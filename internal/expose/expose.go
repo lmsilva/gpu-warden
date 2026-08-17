@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/lmsilva/squire/internal/cycle"
 	"github.com/lmsilva/squire/internal/report"
 	"github.com/lmsilva/squire/internal/verdict"
 )
@@ -47,7 +48,12 @@ func ids(r report.JobReport) string {
 }
 
 // Write renders one scrape's worth of Squire metrics.
-func Write(w io.Writer, reports []report.JobReport, q report.Queue) {
+//
+// It takes the whole snapshot rather than the pieces it reads, so every
+// presenter has the same signature and a field added to a pass reaches this
+// one without changing how it is called.
+func Write(w io.Writer, s cycle.Snapshot) {
+	reports, q := s.Reports, s.Queue
 	fmt.Fprintln(w, "# HELP squire_job_gpu_utilization_percent Average GPU utilization per running job.")
 	fmt.Fprintln(w, "# TYPE squire_job_gpu_utilization_percent gauge")
 	for _, r := range reports {

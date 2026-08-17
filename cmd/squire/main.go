@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/lmsilva/squire/internal/buildinfo"
-	"github.com/lmsilva/squire/internal/cross"
+	"github.com/lmsilva/squire/internal/cycle"
 	"github.com/lmsilva/squire/internal/expose"
 	"github.com/lmsilva/squire/internal/kube"
 	"github.com/lmsilva/squire/internal/promapi"
@@ -173,12 +173,22 @@ func main() {
 	// One event log for the process lifetime, shared by every cycle.
 	ev := newEventLog()
 
+	// Every mode reads through the same source, so the table and the
+	// exporter can only ever differ in how they render what it returned.
+	src := cycle.SourceFunc(func(ctx context.Context) (cycle.Snapshot, error) {
+		return runCycle(ctx, b, kc, c, ev)
+	})
+
 	// --serve turns Squire into an exporter.
 	if c.serveAddr != "" {
 		if c.watch > 0 {
 			fmt.Println("note: --watch is ignored with --serve; Prometheus sets the cadence")
 		}
-		cache := newCycleCache(c.serveCache)
+		// Only the served path is cached. A --watch run asks on its own
+		// cadence and a one-shot run asks once, so neither can amplify -
+		// and a cache there would hand back numbers older than the
+		// interval the operator asked for.
+		cached := cycle.NewCache(src, c.serveCache)
 
 		// A private mux, not http.DefaultServeMux. The default mux is process
 		// global, so any dependency registering a handler in its init would be
@@ -190,10 +200,7 @@ func main() {
 			// to finish into a closed connection.
 			ctx, cancel := context.WithTimeout(r.Context(), scrapeBudget(r))
 			defer cancel()
-			got, err := cache.get(ctx, func(ctx context.Context) (cycle, error) {
-				r, q, err := runCycle(ctx, b, kc, c, ev)
-				return cycle{reports: r, queue: q}, err
-			})
+			got, err := cached.Snapshot(ctx)
 			if err != nil {
 				// 500 rather than a partial body: Prometheus will mark the target
 				// down instead of thinking no jobs are running if we do not return anything
@@ -201,7 +208,7 @@ func main() {
 				return
 			}
 			w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-			expose.Write(w, got.reports, got.queue)
+			expose.Write(w, got)
 		})
 
 		// Explicit timeouts. without them, ListenAndServe leaves all of these at zero,
@@ -231,7 +238,7 @@ func main() {
 	// One loop that serves both modes: --watch 0 runs the body once and returns.
 	for {
 		cycleCtx, cancel := context.WithTimeout(ctx, cycleTimeout)
-		reports, queue, err := runCycle(cycleCtx, b, kc, c, ev)
+		got, err := src.Snapshot(cycleCtx)
 		cancel()
 
 		if err != nil {
@@ -245,8 +252,8 @@ func main() {
 			if c.watch > 0 {
 				fmt.Printf("\n=== %s ===\n", time.Now().Format("15:04:05"))
 			}
-			printTable(os.Stdout, reports, c)
-			printFindings(os.Stdout, reports, queue, c.th)
+			printTable(os.Stdout, got.Reports, c)
+			printFindings(os.Stdout, got)
 		}
 
 		if c.watch == 0 {
@@ -261,126 +268,38 @@ func main() {
 	}
 }
 
-// cycleCache serves the last successful build to any scrape arriving within
-// minAge of it. Without it every scrape runs a full fan-out across Slurm,
-// Kubernetes and Prometheus, so an unauthenticated caller in a loop amplifies
-// into those services rather than into Squire.
-//
-// sem is a one-slot channel used as a lock, held across the build on purpose:
-// a scrape arriving mid-build waits, then finds the cache fresh and returns
-// without querying anything. One build, however many scrapers.
-//
-// It is a channel rather than a sync.Mutex because a mutex cannot be given up.
-// Prometheus abandons a scrape after its own timeout, which is shorter than
-// cycleTimeout, and a waiter blocked on a mutex would keep waiting for a
-// client that has already gone.
-// cycle is one build's whole output: the per-job reports and the queue
-// pressure measured at the same instant. They are cached together because a
-// finding that crosses them would otherwise pair fresh reports with a stale
-// queue, or the reverse.
-type cycle struct {
-	reports []report.JobReport
-	queue   report.Queue
-}
-
-type cycleCache struct {
-	sem    chan struct{}
-	minAge time.Duration
-	at     time.Time
-	last   cycle
-}
-
-// newCycleCache is required rather than optional: a nil channel blocks
-// forever, so a zero-value cycleCache would hang the first scrape.
-func newCycleCache(minAge time.Duration) *cycleCache {
-	return &cycleCache{sem: make(chan struct{}, 1), minAge: minAge}
-}
-
-// get returns a cached build if one is younger than minAge, otherwise builds
-// a fresh one. Errors are never cached: one transient Slurm hiccup must not
-// buy minAge of silence.
-//
-// Freshness is judged by the timestamp, never by the slice. report.Build
-// returns nil when no GPU jobs are running, so a c.reports != nil test would
-// never cache anything on an idle cluster.
-func (c *cycleCache) get(ctx context.Context, build func(context.Context) (cycle, error)) (cycle, error) {
-	// Taking the slot is the lock. The ctx case is what a mutex cannot do:
-	// a scrape whose client has given up stops waiting and returns.
-	select {
-	case c.sem <- struct{}{}:
-		defer func() { <-c.sem }()
-	case <-ctx.Done():
-		return cycle{}, ctx.Err()
-	}
-	if !c.at.IsZero() && time.Since(c.at) < c.minAge {
-		return c.last, nil
-	}
-	got, err := build(ctx)
-	if err != nil {
-		return cycle{}, err
-	}
-	c.at, c.last = time.Now(), got
-	return got, nil
-}
-
-// runCycle builds the reports and, when --act is set, emits Events. Both output
+// runCycle runs one pass and, when --act is set, emits Events. Both output
 // modes go through this single function, which is what lets --serve and --act
 // compose without duplicating the decision logic.
-func runCycle(ctx context.Context, b *report.Builder, kc *kube.Client, c config, ev *eventLog) ([]report.JobReport, report.Queue, error) {
-	reports, queue, err := b.Build(ctx)
+func runCycle(ctx context.Context, b *report.Builder, kc *kube.Client, c config, ev *eventLog) (cycle.Snapshot, error) {
+	s, err := cycle.Build(ctx, b, c.th.GraceCeiling)
 	if err != nil {
-		return nil, report.Queue{}, err
+		return cycle.Snapshot{}, err
 	}
 	if c.act {
-		if err := actOnZombies(ctx, kc, reports, c.th.IdleWindow, ev); err != nil {
-			return reports, queue, fmt.Errorf("acting on zombies: %w", err)
+		if err := actOnZombies(ctx, kc, s.Reports, c.th.IdleWindow, ev); err != nil {
+			return s, fmt.Errorf("acting on zombies: %w", err)
 		}
 	}
-	return reports, queue, nil
+	return s, nil
 }
 
-// printTable renders reports as a top-style table: one column per verdict axis,
-// and (with --wide) the evidence behind them.
-// toCrossJob adapts a finished report into the cross-source engine's input.
-// The grace period travels with it so the engine can stay silent on a job
-// that has not yet had the chance to waste anything - the same ceiling the
-// activity verdict uses, from the same thresholds.
-func toCrossJob(r report.JobReport, grace time.Duration) cross.Job {
-	return cross.Job{
-		ID: r.Job.JobID, Name: r.Job.Name, User: r.Job.Owner(),
-		GPUsRequested: r.GPUs,
-		Elapsed:       r.Elapsed,
-		Grace:         grace,
-		PerGPU:        r.PerGPU,
-		HasLit:        r.HasLit, LitGPUs: r.LitGPUs,
-		HasFirstWork: r.HasFirstWork, FirstWorkAfter: r.FirstWorkAfter,
-	}
-}
-
-// printFindings writes the cross-source findings under the verdict table.
+// printFindings writes the findings under the verdict table.
 //
 // A separate block rather than more columns: the table answers "what is every
 // job doing", one row each, and findings are exceptions that most jobs do not
 // have. Widening every row for something few of them carry would cost the
 // table its shape. The columns match squire-lint's, so a reader who has seen
 // one recognises the other.
-func printFindings(out io.Writer, reports []report.JobReport, q report.Queue, th verdict.Thresholds) {
-	jobs := make([]cross.Job, 0, len(reports))
-	names := make(map[int]string, len(reports))
-	for _, r := range reports {
-		jobs = append(jobs, toCrossJob(r, th.GraceCeiling))
-		names[r.Job.JobID] = r.Job.Name
-	}
-	findings := cross.CheckAll(jobs, cross.Queue{
-		PendingGPUJobs: q.PendingGPUJobs, PendingGPUs: q.PendingGPUs,
-	})
-	if len(findings) == 0 {
+func printFindings(out io.Writer, s cycle.Snapshot) {
+	if len(s.Findings) == 0 {
 		return
 	}
+	names := s.Names()
 	fmt.Fprintln(out)
 	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(w, "JOBID\tNAME\tSEVERITY\tRULE\tFINDING")
-	for _, f := range findings {
+	for _, f := range s.Findings {
 		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\n",
 			f.JobID, names[f.JobID], f.Severity, f.Rule, f.Message)
 	}
