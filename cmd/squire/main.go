@@ -56,6 +56,22 @@ func scrapeBudget(r *http.Request) time.Duration {
 	return full - scrapeTimeoutOffset
 }
 
+// minPageRefresh floors how often the page reloads itself. Below this the
+// browser is asking more often than a person reads, and on a cluster running
+// without a cache each reload is a full fan-out.
+const minPageRefresh = 30 * time.Second
+
+// pageRefresh is how long the page waits before reloading. It follows
+// --serve-cache, because a reload inside the cache window re-renders numbers
+// the reader has already seen - so the default cadence costs the cluster one
+// build per window however many browsers are open.
+func pageRefresh(serveCache time.Duration) time.Duration {
+	if serveCache < minPageRefresh {
+		return minPageRefresh
+	}
+	return serveCache
+}
+
 type config struct {
 	// Config carries the Slurm connection settings, bound from the same
 	// place the configuration check binds them so the two cannot drift.
@@ -108,8 +124,8 @@ func parseConfig(args []string) config {
 	// podMetricLabel is on the DCGM SERIES (Prometheus) and carries the pod name.
 	fs.StringVar(&c.podHostLabel, "pod-hostname-label", envOr("SQUIRE_POD_HOSTNAME_LABEL", "nodeset.slinky.slurm.net/pod-hostname"), "pod label carrying the Slurm node name")
 	fs.StringVar(&c.podMetricLabel, "pod-label", envOr("SQUIRE_POD_LABEL", "exported_pod"), "DCGM metric label carrying the pod name")
-	fs.StringVar(&c.serveAddr, "serve", "", "if set (e.g. :9410), expose /metrics instead of printing a table")
-	fs.DurationVar(&c.serveCache, "serve-cache", 30*time.Second, "minimum age of a cached build before /metrics rebuilds (0 disables)")
+	fs.StringVar(&c.serveAddr, "serve", "", "if set (e.g. :9410), serve /metrics and a web view instead of printing a table")
+	fs.DurationVar(&c.serveCache, "serve-cache", 30*time.Second, "minimum age of a cached build before a request rebuilds (0 disables)")
 	fs.DurationVar(&c.watch, "watch", 0, "refresh interval for top mode (0 = print once)")
 	fs.BoolVar(&c.act, "act", false, "emit Kubernetes Events for zombie findings")
 	fs.Float64Var(&c.dollarRate, "dollar-rate", 0, "optional $/GPU-hour for waste costing")
@@ -209,6 +225,31 @@ func main() {
 			expose.Write(w, got)
 		})
 
+		// The page, on the same port and out of the same cache. "GET /{$}"
+		// is an exact match on the root: a bare "/" is a catch-all, and
+		// every wrong path - a mistyped URL, a browser asking for a favicon
+		// - would render the dashboard with a 200 instead of a 404.
+		mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+			ctx, cancel := context.WithTimeout(r.Context(), cycleTimeout)
+			defer cancel()
+			got, err := cached.Snapshot(ctx)
+			if err != nil {
+				// The same sentence /metrics returns, deliberately. Two
+				// renderings of one failure is how a support conversation
+				// goes wrong.
+				http.Error(w, fmt.Sprintf("building reports: %v", err), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			if err := view.HTML(w, got, view.HTMLOptions{
+				DollarRate: c.dollarRate,
+				Version:    buildinfo.Version,
+				Refresh:    pageRefresh(c.serveCache),
+			}); err != nil {
+				fmt.Println("error: rendering the page:", err)
+			}
+		})
+
 		// Explicit timeouts. without them, ListenAndServe leaves all of these at zero,
 		// meaning no limit, so a client sending headers slowly can hold a
 		// connection open forever.
@@ -220,7 +261,7 @@ func main() {
 			WriteTimeout:      cycleTimeout + 60*time.Second,
 			IdleTimeout:       60 * time.Second,
 		}
-		fmt.Println("serving /metrics on", c.serveAddr)
+		fmt.Println("serving /metrics and / on", c.serveAddr)
 		if err := srv.ListenAndServe(); err != nil {
 			fmt.Println("error:", err)
 			os.Exit(1)
