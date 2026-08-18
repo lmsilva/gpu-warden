@@ -62,13 +62,17 @@ func ids(r report.JobReport) string {
 // works, and without this the numbers arrive with no way to say which build
 // measured them.
 //
-// dirty is a label rather than an omission: a build from a modified tree
-// reports a commit whose code is not what is running, and a claim about the
-// commit without that caveat would be confidently wrong.
+// tree_state is a label rather than an omission, and has three values rather
+// than two. A build from a modified tree reports a commit whose code is not
+// what is running, and a claim about the commit without that caveat would be
+// confidently wrong. But a container build records no repository at all, and
+// saying "clean" there would be the same confident wrongness in the other
+// direction - this metric exists to say which build is running, so an unknown
+// has to look like an unknown.
 func buildInfo(w io.Writer) {
-	rev, dirty := buildinfo.Revision()
-	labels := fmt.Sprintf(`version="%s",revision="%s",dirty="%t",go_version="%s"`,
-		esc(buildinfo.Version), esc(rev), dirty, esc(runtime.Version()))
+	rev, state := buildinfo.Revision()
+	labels := fmt.Sprintf(`version="%s",revision="%s",tree_state="%s",go_version="%s"`,
+		esc(buildinfo.Version), esc(rev), esc(string(state)), esc(runtime.Version()))
 	fmt.Fprintln(w, "# HELP squire_build_info The build serving these metrics. Always 1; read the labels.")
 	fmt.Fprintln(w, "# TYPE squire_build_info gauge")
 	fmt.Fprintf(w, "squire_build_info{%s} 1\n", labels)

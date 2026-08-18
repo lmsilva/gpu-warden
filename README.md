@@ -481,7 +481,9 @@ A build that was not stamped says `dev`, which is the truthful answer rather tha
 | `squire_pending_gpus` | gauge | Devices those waiting jobs are asking for. No job labels. |
 | `squire_build_info` | gauge | Always `1`; the build is in the labels. No job labels. |
 
-`squire_build_info` answers which build produced everything else. The value carries nothing — the `version`, `revision`, `dirty` and `go_version` labels do, and a constant `1` is what lets them be joined onto any other series with `group_left`. It is the only way to identify a running Squire without a shell, and the image has none.
+`squire_build_info` answers which build produced everything else. The value carries nothing — the `version`, `revision`, `tree_state` and `go_version` labels do, and a constant `1` is what lets them be joined onto any other series with `group_left`. It is the only way to identify a running Squire without a shell, and the image has none.
+
+`tree_state` is `clean`, `modified` or `unrecorded`. A published image is always `unrecorded`: the build copies source without `.git`, so the toolchain has no repository to look at and `revision` is empty. `modified` means the binary was built from a tree with uncommitted changes, so the commit it names does not describe the code that is running.
 
 `squire_job_gpus_lit` is emitted **only when measured**. A Prometheus series cannot say "unknown", so an unread count is left out entirely rather than published as `0` — a dashboard averaging it would otherwise show idle devices that were never measured. Compare it against `squire_job_gpus_held` for the same job; the gap is the idle allocation.
 

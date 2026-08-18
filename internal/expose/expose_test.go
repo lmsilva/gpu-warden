@@ -65,7 +65,7 @@ func TestBuildInfoIsAlwaysEmitted(t *testing.T) {
 	if !strings.Contains(out, `go_version="go1`) || !strings.Contains(out, "} 1\n") {
 		t.Errorf("want a labelled series with value 1:\n%s", out)
 	}
-	for _, label := range []string{"version=", "revision=", "dirty="} {
+	for _, label := range []string{"version=", "revision=", "tree_state="} {
 		if !strings.Contains(out, label) {
 			t.Errorf("build info is missing the %s label:\n%s", label, out)
 		}

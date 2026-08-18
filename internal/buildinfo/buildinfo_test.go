@@ -52,3 +52,34 @@ func TestAsked(t *testing.T) {
 		}
 	}
 }
+
+// TestTreeStateNeverGuesses: the three states exist because "no uncommitted
+// changes" and "no repository to look at" are different facts. A container
+// build records nothing, and reporting clean there would be a definite claim
+// about something never measured - the same error as printing 0 for a GPU
+// count that was not read.
+func TestTreeStateNeverGuesses(t *testing.T) {
+	rev, state := Revision()
+	switch state {
+	case TreeClean, TreeModified:
+		if rev == "" {
+			t.Errorf("state %q claims to know the tree, but no commit was recorded", state)
+		}
+	case TreeUnrecorded:
+		// Fine either way: a partial record reports unrecorded and may
+		// still carry the commit it did see.
+	default:
+		t.Errorf("unknown tree state %q", state)
+	}
+}
+
+// TestStringMarksOnlyModified: an unrecorded tree adds nothing to the line,
+// because there is nothing to warn about - the caveat is for a binary whose
+// code is not the commit it names.
+func TestStringMarksOnlyModified(t *testing.T) {
+	_, state := Revision()
+	got := String("squire")
+	if state != TreeModified && strings.Contains(got, "modified") {
+		t.Errorf("state is %q but the line claims modified: %s", state, got)
+	}
+}
