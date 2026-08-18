@@ -485,7 +485,7 @@ A build that was not stamped says `dev`, which is the truthful answer rather tha
 
 `tree_state` is `clean`, `modified` or `unrecorded`. A published image is always `unrecorded`: the build copies source without `.git`, so the toolchain has no repository to look at and `revision` is empty. `modified` means the binary was built from a tree with uncommitted changes, so the commit it names does not describe the code that is running.
 
-`squire_job_gpus_lit` is emitted **only when measured**. A Prometheus series cannot say "unknown", so an unread count is left out entirely rather than published as `0` — a dashboard averaging it would otherwise show idle devices that were never measured. Compare it against `squire_job_gpus_held` for the same job; the gap is the idle allocation.
+Every telemetry-derived series — `utilization_percent`, `hours_wasted`, both `memory` series and `gpus_lit` — is emitted **only when measured**. A Prometheus series cannot say "unknown", so an unread value is left out entirely rather than published as `0`: a dashboard averaging utilization would otherwise show idle devices that were never read. A job whose telemetry has not arrived still publishes what is known — its allocation and its verdict, which will say `analyzing`. Compare `gpus_lit` against `squire_job_gpus_held` for the same job; the gap is the idle allocation.
 
 The two `squire_pending_*` series carry no job labels, because queue pressure is a fact about the cluster rather than about any one job. Both are **always emitted, including zero** — a dashboard has to be able to tell "nobody is waiting" from "Squire is not running", and only one of those is worth an alert.
 

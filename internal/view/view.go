@@ -83,9 +83,18 @@ func toRow(r report.JobReport, dollarRate float64) row {
 		mem = fmt.Sprintf("%.1f/%.0fG (%.0f%%)",
 			r.PeakMemMiB/1024, r.CapacityMiB/1024, r.PeakMemFrac*100)
 	}
-	wasted := fmt.Sprintf("%.1f", r.WastedH)
-	if dollarRate > 0 {
-		wasted = fmt.Sprintf("%.1f ($%.2f)", r.WastedH, r.WastedH*dollarRate)
+	// Utilization, and the waste derived from it, exist only when telemetry
+	// was actually read. HasData false means the queries came back empty, so
+	// these three would otherwise print definite zeros for numbers that were
+	// never measured - the same lie in three columns.
+	avg, peak, wasted := "-", "-", "-"
+	if r.HasData {
+		avg = fmt.Sprintf("%.0f", r.AvgUtil)
+		peak = fmt.Sprintf("%.0f", r.PeakUtil)
+		wasted = fmt.Sprintf("%.1f", r.WastedH)
+		if dollarRate > 0 {
+			wasted = fmt.Sprintf("%.1f ($%.2f)", r.WastedH, r.WastedH*dollarRate)
+		}
 	}
 	// A job whose telemetry could not be scoped to its own GPU devices is
 	// marked, because on a shared node those numbers include a neighbour's
@@ -112,8 +121,8 @@ func toRow(r report.JobReport, dollarRate float64) row {
 		User:    r.Job.Owner(),
 		GPUs:    gpus,
 		Elapsed: r.Elapsed.Round(time.Minute).String(),
-		Avg:     fmt.Sprintf("%.0f", r.AvgUtil),
-		Peak:    fmt.Sprintf("%.0f", r.PeakUtil),
+		Avg:     avg,
+		Peak:    peak,
 		Mem:     mem,
 		Wasted:  wasted,
 		// Every reason, not just the first. Judge appends them in priority

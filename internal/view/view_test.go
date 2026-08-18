@@ -97,12 +97,28 @@ func TestUnmeasuredReadsAsADash(t *testing.T) {
 	if r.Sizing != "-" {
 		t.Errorf("an undecided sizing axis must be a dash, got %q", r.Sizing)
 	}
+	// Utilization and its derived waste share the rule: no telemetry read
+	// means no numbers, in all three columns at once.
+	if r.Avg != "-" {
+		t.Errorf("unread utilization must be a dash, got %q", r.Avg)
+	}
+	if r.Peak != "-" {
+		t.Errorf("an unread peak must be a dash, got %q", r.Peak)
+	}
+	if r.Wasted != "-" {
+		t.Errorf("waste derived from unread telemetry must be a dash, got %q", r.Wasted)
+	}
 
 	// And a measured zero is a number, not a dash.
 	lit0 := unmeasured()
 	lit0.HasLit = true
 	if got := toRow(lit0, 0).Lit; got != "0" {
 		t.Errorf("a measured zero must print as 0, got %q", got)
+	}
+	data0 := unmeasured()
+	data0.HasData = true
+	if got := toRow(data0, 0); got.Avg != "0" || got.Wasted != "0.0" {
+		t.Errorf("measured zeros must print as numbers, got avg %q wasted %q", got.Avg, got.Wasted)
 	}
 }
 

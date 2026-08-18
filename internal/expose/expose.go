@@ -89,7 +89,12 @@ func Write(w io.Writer, s cycle.Snapshot) {
 	fmt.Fprintln(w, "# HELP squire_job_gpu_utilization_percent Average GPU utilization per running job.")
 	fmt.Fprintln(w, "# TYPE squire_job_gpu_utilization_percent gauge")
 	for _, r := range reports {
-		fmt.Fprintf(w, "squire_job_gpu_utilization_percent{%s} %.2f\n", ids(r), r.AvgUtil)
+		// Only emitted when measured, like every telemetry series here: a
+		// Prometheus series cannot say "unknown", and a job whose telemetry
+		// was never read would otherwise publish 0% - a false idle reading.
+		if r.HasData {
+			fmt.Fprintf(w, "squire_job_gpu_utilization_percent{%s} %.2f\n", ids(r), r.AvgUtil)
+		}
 	}
 
 	// Devices actually lit, next to devices held. The pair is the numerator
@@ -129,7 +134,11 @@ func Write(w io.Writer, s cycle.Snapshot) {
 	fmt.Fprintln(w, "# HELP squire_job_gpu_hours_wasted Allocated-but-unused GPU-hours per running job.")
 	fmt.Fprintln(w, "# TYPE squire_job_gpu_hours_wasted gauge")
 	for _, r := range reports {
-		fmt.Fprintf(w, "squire_job_gpu_hours_wasted{%s} %.2f\n", ids(r), r.WastedH)
+		// Derived from the utilization above, so it shares that gate: waste
+		// computed from nothing is not zero, it is unknown.
+		if r.HasData {
+			fmt.Fprintf(w, "squire_job_gpu_hours_wasted{%s} %.2f\n", ids(r), r.WastedH)
+		}
 	}
 
 	// Axis A. One series per state per job; exactly one carries a 1.
@@ -170,12 +179,19 @@ func Write(w io.Writer, s cycle.Snapshot) {
 	fmt.Fprintln(w, "# HELP squire_job_gpu_memory_peak_bytes Peak framebuffer memory used on a single GPU of the job.")
 	fmt.Fprintln(w, "# TYPE squire_job_gpu_memory_peak_bytes gauge")
 	for _, r := range reports {
-		fmt.Fprintf(w, "squire_job_gpu_memory_peak_bytes{%s} %.0f\n", ids(r), r.PeakMemMiB*mib)
+		// Gated on capacity: both memory numbers come from the same read,
+		// and a 0-byte peak on a card whose size was never learned is a
+		// reading that did not happen.
+		if r.CapacityMiB > 0 {
+			fmt.Fprintf(w, "squire_job_gpu_memory_peak_bytes{%s} %.0f\n", ids(r), r.PeakMemMiB*mib)
+		}
 	}
 	fmt.Fprintln(w, "# HELP squire_job_gpu_memory_capacity_bytes Total framebuffer memory of the GPU the job holds.")
 	fmt.Fprintln(w, "# TYPE squire_job_gpu_memory_capacity_bytes gauge")
 	for _, r := range reports {
-		fmt.Fprintf(w, "squire_job_gpu_memory_capacity_bytes{%s} %.0f\n", ids(r), r.CapacityMiB*mib)
+		if r.CapacityMiB > 0 {
+			fmt.Fprintf(w, "squire_job_gpu_memory_capacity_bytes{%s} %.0f\n", ids(r), r.CapacityMiB*mib)
+		}
 	}
 
 	// Kept for compatibility with anything already alerting on it. It is now

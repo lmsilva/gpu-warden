@@ -49,6 +49,45 @@ func TestQueueGaugesAlwaysEmitted(t *testing.T) {
 	}
 }
 
+// TestUnreadTelemetryIsNotEmitted pins the gate on every telemetry-derived
+// series. A job appears with its allocation and verdict the moment it is
+// known; its numbers appear only once they have been read. Publishing an
+// unread utilization as 0% would hand every dashboard a false idle reading -
+// the exact export squire_job_gpus_lit already refuses.
+func TestUnreadTelemetryIsNotEmitted(t *testing.T) {
+	unread := report.JobReport{Job: slurmapi.Job{JobID: 7, UserName: "cam", Partition: "all"}, GPUs: 2}
+	var sb strings.Builder
+	Write(&sb, cycle.Snapshot{Reports: []report.JobReport{unread}})
+	out := sb.String()
+
+	for _, series := range []string{
+		"squire_job_gpu_utilization_percent{",
+		"squire_job_gpu_hours_wasted{",
+		"squire_job_gpu_memory_peak_bytes{",
+		"squire_job_gpu_memory_capacity_bytes{",
+		"squire_job_gpus_lit{",
+	} {
+		if strings.Contains(out, series) {
+			t.Errorf("unread telemetry must not be published: %s\n%s", series, out)
+		}
+	}
+	// What is known is still published: the allocation and the verdict.
+	for _, want := range []string{"squire_job_gpus_held{", "squire_job_activity{"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("known facts must still be published: %s\n%s", want, out)
+		}
+	}
+
+	// And a measured zero is a value, not an absence.
+	zero := unread
+	zero.HasData = true
+	var sb2 strings.Builder
+	Write(&sb2, cycle.Snapshot{Reports: []report.JobReport{zero}})
+	if !strings.Contains(sb2.String(), "squire_job_gpu_utilization_percent{") {
+		t.Errorf("a measured zero must be published:\n%s", sb2.String())
+	}
+}
+
 // TestBuildInfoIsAlwaysEmitted covers the one series that must appear even
 // when the cluster is empty and every other metric is absent. A scrape that
 // returned nothing at all could not say which build returned nothing.
