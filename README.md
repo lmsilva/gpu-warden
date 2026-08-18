@@ -479,6 +479,9 @@ A build that was not stamped says `dev`, which is the truthful answer rather tha
 | `squire_job_zombie` | gauge | Kept for compatibility; derived from `squire_job_activity`. |
 | `squire_pending_gpu_jobs` | gauge | Jobs waiting because the cluster is short of GPUs. No job labels. |
 | `squire_pending_gpus` | gauge | Devices those waiting jobs are asking for. No job labels. |
+| `squire_build_info` | gauge | Always `1`; the build is in the labels. No job labels. |
+
+`squire_build_info` answers which build produced everything else. The value carries nothing — the `version`, `revision`, `dirty` and `go_version` labels do, and a constant `1` is what lets them be joined onto any other series with `group_left`. It is the only way to identify a running Squire without a shell, and the image has none.
 
 `squire_job_gpus_lit` is emitted **only when measured**. A Prometheus series cannot say "unknown", so an unread count is left out entirely rather than published as `0` — a dashboard averaging it would otherwise show idle devices that were never measured. Compare it against `squire_job_gpus_held` for the same job; the gap is the idle allocation.
 

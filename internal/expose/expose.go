@@ -4,8 +4,10 @@ package expose
 import (
 	"fmt"
 	"io"
+	"runtime"
 	"strings"
 
+	"github.com/lmsilva/squire/internal/buildinfo"
 	"github.com/lmsilva/squire/internal/cycle"
 	"github.com/lmsilva/squire/internal/report"
 	"github.com/lmsilva/squire/internal/verdict"
@@ -47,6 +49,31 @@ func ids(r report.JobReport) string {
 		r.Job.JobID, esc(r.Job.Owner()), esc(r.Job.Partition))
 }
 
+// buildInfo says which build produced everything below it.
+//
+// The information is in the labels and the value is always 1, which is the
+// convention for this metric everywhere: it makes the labels joinable onto
+// any other series with group_left, so a graph can be annotated with the
+// build that produced it.
+//
+// It matters more than it looks. Every other way of asking "what am I
+// running" needs a shell in the container or a terminal on the host, and a
+// distroless image has no shell. Scraping is the one channel that always
+// works, and without this the numbers arrive with no way to say which build
+// measured them.
+//
+// dirty is a label rather than an omission: a build from a modified tree
+// reports a commit whose code is not what is running, and a claim about the
+// commit without that caveat would be confidently wrong.
+func buildInfo(w io.Writer) {
+	rev, dirty := buildinfo.Revision()
+	labels := fmt.Sprintf(`version="%s",revision="%s",dirty="%t",go_version="%s"`,
+		esc(buildinfo.Version), esc(rev), dirty, esc(runtime.Version()))
+	fmt.Fprintln(w, "# HELP squire_build_info The build serving these metrics. Always 1; read the labels.")
+	fmt.Fprintln(w, "# TYPE squire_build_info gauge")
+	fmt.Fprintf(w, "squire_build_info{%s} 1\n", labels)
+}
+
 // Write renders one scrape's worth of Squire metrics.
 //
 // It takes the whole snapshot rather than the pieces it reads, so every
@@ -54,6 +81,7 @@ func ids(r report.JobReport) string {
 // one without changing how it is called.
 func Write(w io.Writer, s cycle.Snapshot) {
 	reports, q := s.Reports, s.Queue
+	buildInfo(w)
 	fmt.Fprintln(w, "# HELP squire_job_gpu_utilization_percent Average GPU utilization per running job.")
 	fmt.Fprintln(w, "# TYPE squire_job_gpu_utilization_percent gauge")
 	for _, r := range reports {

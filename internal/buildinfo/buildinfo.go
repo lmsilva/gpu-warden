@@ -48,6 +48,11 @@ func revision() (string, bool) {
 	return rev, dirty
 }
 
+// Revision exposes what the toolchain recorded, for callers that need the
+// parts rather than the rendered line. Empty when nothing was recorded, which
+// is the container case.
+func Revision() (commit string, dirty bool) { return revision() }
+
 // String renders one line naming the binary, its version, the commit where
 // one was recorded, and the toolchain. Everything a bug report needs and
 // nothing that has to be looked up.
