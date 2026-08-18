@@ -6,7 +6,8 @@
 # without inventing a version number for it.
 #
 # Either way the version the binaries report comes from here, which is what
-# makes a bug report traceable back to a commit.
+# makes a bug report traceable back to a commit - a tag reports itself, a
+# branch build reports the branch and the commit it was built from.
 # Action majors are pinned to the newest that declares runs.using: node24.
 # GitHub removes Node 20 from the runners in September 2026; most of these
 # majors were cut for that migration and carry no behavioural change.
@@ -39,6 +40,18 @@ jobs:
       - run: gofmt -l . | tee /dev/stderr | wc -l | grep -qx 0
       - run: go vet ./...
       - run: go test -race ./...
+
+      # What the binaries report when asked. A tag names itself. A branch has
+      # no version, and the branch name alone is the same string for every
+      # build ever made from it - so a bug report saying "dev" identifies
+      # nothing. Append the commit, which is the whole point of stamping it.
+      - id: version
+        run: |
+          if [ "${{ github.ref_type }}" = tag ]; then
+            echo "value=${{ github.ref_name }}" >>"$GITHUB_OUTPUT"
+          else
+            echo "value=${{ github.ref_name }}+$(git rev-parse --short HEAD)" >>"$GITHUB_OUTPUT"
+          fi
 
       - uses: docker/setup-buildx-action@v4
 
@@ -74,7 +87,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            VERSION=${{ github.ref_name }}
+            VERSION=${{ steps.version.outputs.value }}
 
   # Plain binaries alongside the image. squire-lint's whole argument is that
   # it needs nothing installed, and telling somebody to pull a container to
@@ -117,3 +130,4 @@ jobs:
           # written once and read from the repository rather than composed
           # twice.
           body_path: CHANGELOG.md
+          
