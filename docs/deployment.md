@@ -24,6 +24,8 @@ Plain binaries and checksums are attached to each release too. Those are for `sq
 
 ## Applying the manifests
 
+**Create the Slurm token first.** The Deployment mounts it as a required volume, so applying the manifests without it gives a pod that sits in `ContainerCreating` indefinitely — not `CrashLoopBackOff`, not a pull error, and with nothing in the pod's own events once the first mount attempt has aged out. It looks like a hung cluster and it is a missing Secret. [Creating it](#creating-it) is below; come back here after.
+
 ```bash
 kubectl apply -f deploy/squire.yaml
 ```
@@ -123,6 +125,17 @@ kubectl -n $NS patch secret squire-slurm-token \
 ```
 
 Or, where the operator minted it, delete and re-apply the `Token` resource.
+
+### Running a branch build
+
+`:dev` moves with every push to the branch, and the manifest sets `imagePullPolicy: Always` because of it. Without that, Kubernetes defaults to pulling only when the image is absent — correct for a version tag, wrong for a moving one: a node that has pulled `:dev` once keeps that build through every `rollout restart` and every `set image`, and the pod cheerfully reports the version it was built with.
+
+That failure is quiet, so it is worth knowing how to see it. Every build also publishes a `sha-<commit>` tag, and the running image's digest is what settles the question:
+
+```bash
+kubectl -n $NS get pod -l app.kubernetes.io/name=squire \
+  -o jsonpath='{.items[0].status.containerStatuses[0].imageID}'
+```
 
 ## Recording findings as Events
 

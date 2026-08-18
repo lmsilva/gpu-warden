@@ -99,6 +99,14 @@ spec:
           #   kubectl -n slurm set image deploy/squire \
           #     squire=ghcr.io/lmsilva/squire:dev
           image: ghcr.io/lmsilva/squire:v0.1.0
+          # A version tag never changes, so the default of only pulling when
+          # the image is absent is right for it. :dev is a moving tag, and the
+          # default caches it as though it were not - a node that pulled :dev
+          # once keeps that build through every restart and every set image,
+          # and the pod reports the version it was built with, which is "dev"
+          # either way. The symptom is a deploy that looks like it worked and
+          # is running last month's binary.
+          imagePullPolicy: Always
           args:
             - --serve=:9101
             # Confirm both against your cluster before applying - service
@@ -169,4 +177,3 @@ spec:
     - name: metrics
       port: 9101
       targetPort: metrics
-
