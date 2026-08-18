@@ -16,6 +16,8 @@ Reads Slurm, Prometheus and the Kubernetes API and reports, per job, what its GP
   - `slow-first-gpu-work` — a long gap before the first device started
   - `blocking-idle-allocation` — the above, while other jobs are waiting for GPUs
 - **A `/metrics` endpoint** with per-job utilization, wasted GPU-hours, devices held and lit, verdict states, and cluster queue pressure.
+- **A web view on the same port**, showing every running GPU job with both verdicts, the evidence behind them, the findings and the queue. Built from the same cached pass as `/metrics`, so a page left open costs nothing extra. No JavaScript and no external assets, for clusters with no route out, and it follows the browser's light or dark setting.
+- **A flag the running mode does not read now says so** instead of being silently dropped.
 - **`--watch` for a live table, `--dollar-rate` to cost the waste, `--wide` for the evidence**, and `--act` to record findings as Kubernetes Events on the offending pod.
 
 ### squire-lint
@@ -44,4 +46,5 @@ Reads one slurmrestd URL. No DCGM, no Prometheus, no kubeconfig — it runs on a
 - **Nothing renews the Slurm token.** The Slurm operator's `Token` resource has a `refresh` field, but its controller was not observed reissuing — a ten-minute token went twenty minutes without renewal. Use a long lifetime with an unprivileged account, and replace it deliberately. Squire picks up a replacement without restarting.
 - **`--act` can record a finding twice.** The guard preventing a job being stamped twice is held in memory, so a new process — a restarted pod, or a second one-shot run — stamps again for jobs it already reported. Kubernetes expires Events after an hour by default, so the window is bounded, but a pod restarting often will produce noise. The manifests ship the flag commented out.
 - **`squire` needs a kubeconfig**, so it is operator-side. There is no user-facing view of the telemetry findings yet; `squire-lint` is what a user runs today.
+- **Neither `/metrics` nor the web view is authenticated.** Both name users and jobs, and the metrics endpoint always has, so a login on one and not the other would protect nothing. Keep the port behind `kubectl port-forward` or a NetworkPolicy, and put authentication in front of it before making it reachable any other way.
 - On a site running `PrivateData=jobs`, an unprivileged token sees only its owner's jobs and the output narrows accordingly.

@@ -255,14 +255,17 @@ lmsilva@PANDAMONIUM:~/squire$
 
 Nothing prints below the table when there are no findings.
 
-#### Serve Prometheus metrics endpoint
+#### Serve metrics and a web view
 
-Do note anyone who can reach this port gets the metrics, and they include usernames. Bind it to localhost or a cluster-internal Service.
-Responses are cached for `--serve-cache` (30s by default). Keep it under your Prometheus scrape interval, or you'll scrape the same numbers twice. `--serve-cache 0` turns it off and rebuilds on every scrape.
+`--serve` puts two surfaces on one port: `/metrics` for Prometheus, and `/` for a person with a browser.
+
+Both are built from the same pass over the cluster and share one cache, so a page left open costs nothing beyond one rebuild per `--serve-cache` however many people are looking at it. Responses are cached for 30s by default — keep that under your Prometheus scrape interval, or you'll scrape the same numbers twice. `--serve-cache 0` turns it off and rebuilds on every request.
+
+**Anyone who can reach this port gets both, and both name users and jobs.** There is no login; see [Nothing on this port is authenticated](#nothing-on-this-port-is-authenticated). Bind it to localhost or a cluster-internal Service.
 
 ```
 lmsilva@PANDAMONIUM:~/squire$ go run ./cmd/squire --serve :9101 &
-serving /metrics on :9101
+serving /metrics and / on :9101
 lmsilva@PANDAMONIUM:~/squire$ curl -sS localhost:9101/metrics | grep -E "squire_job_gpus_(lit|held)"
 # HELP squire_job_gpus_lit GPU devices held by the job that have done work at some point in the run.
 # TYPE squire_job_gpus_lit gauge
@@ -274,6 +277,28 @@ squire_job_gpus_held{job_id="192",user="uid:50000",partition="all"} 2
 squire_job_gpus_held{job_id="193",user="uid:50000",partition="all"} 2
 lmsilva@PANDAMONIUM:~/squire$
 ```
+
+#### The web view
+
+Open the same address in a browser. The page carries what `--wide` shows and nothing more: every running GPU job with both verdicts, the evidence behind each one, the findings underneath, and how many jobs are waiting for a GPU.
+
+It shows the evidence unconditionally. `--wide` exists because a terminal has a width budget to spend; a browser does not, so there is nothing to ration.
+
+The page states **the time the numbers were taken**, not the time you loaded it. Those differ by up to `--serve-cache`, and a dashboard that quietly showed the wrong one would be a dashboard people trust while it goes stale. It reloads itself on the cache interval, never faster than 30 seconds.
+
+Rows come in the order Slurm returns them, the same order as the table. Sorting the worst to the top is a reasonable thing to want and is not done here: two presenters showing the same jobs in different orders is a bug waiting to be argued about, and the findings block already collects the jobs worth looking at.
+
+There is no JavaScript and nothing is fetched from anywhere. Cluster networks routinely have no route to the internet, and a dashboard whose layout depends on a CDN is a dashboard that renders broken exactly where it is needed. It follows the browser's light or dark setting; both are read directly rather than through one set of colours compromising between them.
+
+#### Nothing on this port is authenticated
+
+Neither surface asks for a credential, and that is a decision rather than an omission.
+
+`/metrics` has served usernames, job names and partitions since the exporter existed.
+
+It is also not what this class of tool does. Prometheus, Alertmanager, node-exporter and kube-state-metrics all ship without authentication and expect the platform to supply it. Squire is read-only and stores nothing, so there is no account and no saved state to protect.
+
+**What follows from that is where you put it.** Reaching Squire through `kubectl port-forward` already requires Kubernetes RBAC on the namespace, which is a real boundary. **The first time it is reachable without one — an Ingress, a bookmarked URL, anything a colleague can open unaided — put authentication in front of it.** An Ingress with auth, an oauth2 proxy, or a NetworkPolicy that keeps it where it started.
 
 #### Act on it by stamping the POD!
 ```
@@ -384,8 +409,8 @@ Usage of squire-lint:
 | `--pod-label` | `exported_pod` | DCGM metric label carrying the pod name |
 | `--watch` | `0` | refresh interval for top mode (0 = print once) |
 | `--wide` | `false` | show the evidence behind each verdict, plus lit devices and time to first work |
-| `--serve` | off | expose `/metrics` on this address instead of printing a table |
-| `--serve-cache` | `30s` | how long a build is reused before `/metrics` rebuilds (0 disables) |
+| `--serve` | off | serve `/metrics` and a web view on this address instead of printing a table |
+| `--serve-cache` | `30s` | how long a build is reused before a request rebuilds it (0 disables); `--serve` only |
 | `--act` | `false` | emit Kubernetes Events for zombie findings |
 | `--dollar-rate` | `0` | $/GPU-hour, for costing the waste column |
 | `--grace` | `15m` | warmup ceiling before a job can be judged |
@@ -396,6 +421,8 @@ Usage of squire-lint:
 | `--worked-util` | `10` | avg GPU util % proving the job did real work earlier |
 | `--mem-floor` | `0.30` | peak memory fraction below which a job is over-provisioned |
 
+A flag that the running mode does not read says so rather than being silently dropped — `--serve-cache` without `--serve`, or `--watch` with it. The note goes to stdout and nothing else changes.
+
 Any argument that is not a flag exits 2 rather than being ignored. Go's flag parsing stops at the first non-flag argument, so a stray word would otherwise silently discard every flag after it.
 
 `--zombie-threshold` and `--zombie-window` were removed. They were named after the one verdict they produced; the rules they governed are now `--idle-util` and `--idle-window`. Passing a removed flag exits 2 with `flag provided but not defined`.
@@ -404,7 +431,7 @@ Any argument that is not a flag exits 2 rather than being ignored. Go's flag par
 
 Environment variables: `SLURM_JWT` for the slurmrestd token, and `SQUIRE_SLURM_URL`, `SQUIRE_SLURM_API`, `SQUIRE_PROM_URL`, `SQUIRE_NAMESPACE`, `SQUIRE_POD_HOSTNAME_LABEL`, `SQUIRE_POD_LABEL` as defaults for the flags above.
 
-In `--serve` mode, Squire honours the scrape timeout Prometheus sends and finishes just inside it, so a slow cluster gets an error you can read instead of a dropped connection.
+In `--serve` mode, Squire honours the scrape timeout Prometheus sends and finishes just inside it, so a slow cluster gets an error you can read instead of a dropped connection. A browser gets the same sentence a scrape would, with the same status code — one failure should not read two ways.
 
 ### squire-lint Flags
 
@@ -432,7 +459,7 @@ A build that was not stamped says `dev`, which is the truthful answer rather tha
 - Verdict state names, like `zombie` and `over-provisioned`
 - The Kubernetes Event reason, `GPUAllocationIdle`
 
-**Deliberately not covered: the wording of findings, and table layout.** Those get better with use, and freezing them would help nobody. Script against rule identifiers and metric names, never against message text.
+**Deliberately not covered: the wording of findings, table layout, and anything about the web page.** Those get better with use, and freezing them would help nobody. Script against rule identifiers and metric names, never against message text or HTML.
 
 **Pin a version in anything you deploy.** There is no `latest` tag before 1.0: a moving tag cannot be rolled back to a known state, and two pods started a week apart could be running different code.
 

@@ -216,6 +216,24 @@ The Deployment serves `/metrics` on port 9101 and the Service exposes it. Respon
 
 `/metrics` is also the readiness probe, because it is exactly what a scrape does: a pod that passes it is a pod Prometheus can use.
 
+## Looking at it
+
+The same port serves a web view at `/`, built from the same cached pass. Forward it and open it:
+
+```bash
+kubectl -n $NS port-forward svc/squire 9101:9101
+```
+
+```
+http://localhost:9101/
+```
+
+**Neither surface is authenticated**, and that is deliberate: `/metrics` has always served usernames and job names, so a login on the page beside it would protect nothing a `curl` cannot already reach. The reasoning is in the [README](../README.md#nothing-on-this-port-is-authenticated).
+
+**What that means for you is one rule.** A port-forward already requires Kubernetes RBAC on this namespace, so as installed above, the boundary is your cluster's. **The first time you make Squire reachable without a port-forward, put authentication in front of it** — an Ingress with auth, an oauth2 proxy, or a NetworkPolicy holding it where it is. Do not wait to be asked; an internal dashboard listing who is wasting what is the kind of URL that gets shared.
+
+The page reloads itself on the cache interval, so a browser left open on a wall display costs one rebuild per window no matter how many are watching.
+
 ## When it does not work
 
 **`ImagePullBackOff`.** Read whether it says `not found` or `denied` — they are unrelated. `not found` means the tag does not exist, usually a manifest pinning a version that has not been released. `denied` means the registry: a package pushed to ghcr.io is private by default.
