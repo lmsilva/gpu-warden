@@ -113,7 +113,7 @@ jobs:
           mkdir -p dist
           for pair in linux/amd64 linux/arm64; do
             os=${pair%/*}; arch=${pair#*/}
-            for cmd in squire squire-lint; do
+            for cmd in squire squire-lint squire-me; do
               CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath \
                 -ldflags="-s -w -X github.com/lmsilva/squire/internal/buildinfo.Version=${VERSION}" \
                 -o "dist/${cmd}-${os}-${arch}" "./cmd/${cmd}"

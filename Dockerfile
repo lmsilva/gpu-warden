@@ -1,4 +1,4 @@
-# Build both binaries, then ship them on a base with nothing else in it.
+# Build all three binaries, then ship them on a base with nothing else in it.
 #
 # The Go version is pinned rather than tracking latest, so an image built six
 # months from now is the same image.
@@ -28,7 +28,8 @@ ARG VERSION=dev
 ENV CGO_ENABLED=0
 RUN LDFLAGS="-s -w -X github.com/lmsilva/squire/internal/buildinfo.Version=${VERSION}" \
  && go build -trimpath -ldflags="$LDFLAGS" -o /out/squire      ./cmd/squire \
- && go build -trimpath -ldflags="$LDFLAGS" -o /out/squire-lint ./cmd/squire-lint
+ && go build -trimpath -ldflags="$LDFLAGS" -o /out/squire-lint ./cmd/squire-lint \
+ && go build -trimpath -ldflags="$LDFLAGS" -o /out/squire-me   ./cmd/squire-me
 
 # Distroless static rather than scratch: it carries CA certificates, without
 # which every HTTPS call to slurmrestd or the Kubernetes API fails with an
@@ -40,6 +41,7 @@ FROM gcr.io/distroless/static-debian12:nonroot
 
 COPY --from=build /out/squire      /usr/local/bin/squire
 COPY --from=build /out/squire-lint /usr/local/bin/squire-lint
+COPY --from=build /out/squire-me   /usr/local/bin/squire-me
 
 # The licence terms travel with the binaries, not just with the source.
 COPY LICENSE NOTICE /usr/local/share/squire/
