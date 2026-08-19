@@ -18,13 +18,14 @@ import (
 type fakeBuilder struct {
 	reports []report.JobReport
 	queue   report.Queue
+	jobs    []slurmapi.Job
 	err     error
 	calls   int
 }
 
-func (f *fakeBuilder) Build(context.Context) ([]report.JobReport, report.Queue, error) {
+func (f *fakeBuilder) Build(context.Context) (report.Pass, error) {
 	f.calls++
-	return f.reports, f.queue, f.err
+	return report.Pass{Reports: f.reports, Queue: f.queue, Jobs: f.jobs}, f.err
 }
 
 // idleHolder is a job past its grace period holding four GPUs with one lit -
@@ -311,5 +312,31 @@ func TestCacheWaiterHonoursContext(t *testing.T) {
 	}
 	if got := built.Load(); got != 1 {
 		t.Errorf("a cancelled waiter must not build: want only the held build, got %d", got)
+	}
+}
+
+// TestPassCarriesEveryJob: the reports hold only running jobs with cards, so
+// a finding about a pending or CPU-only job would have nothing to name it
+// with. The whole list travels alongside them.
+func TestPassCarriesEveryJob(t *testing.T) {
+	b := &fakeBuilder{
+		reports: []report.JobReport{idleHolder(time.Minute)},
+		jobs: []slurmapi.Job{
+			{JobID: 1, Name: "holder"},
+			{JobID: 2, Name: "pending-cpu-job"},
+		},
+	}
+	s, err := Build(context.Background(), b, time.Minute)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if len(s.Jobs) != 2 {
+		t.Fatalf("want every job, got %d", len(s.Jobs))
+	}
+	if len(s.Reports) != 1 {
+		t.Errorf("the reports stay as they were, got %d", len(s.Reports))
+	}
+	if s.Jobs[1].Name != "pending-cpu-job" {
+		t.Errorf("a job outside the reports must keep its name, got %q", s.Jobs[1].Name)
 	}
 }

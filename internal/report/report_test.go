@@ -197,12 +197,12 @@ func TestBuild(t *testing.T) {
 		"w-3": "pod-w-3", "w-4": "pod-w-4", "w-9": "pod-w-9"}
 	b := &Builder{Jobs: jobs, Prom: prom, Nodes: nodes, PodLabel: "exported_pod",
 		Thresholds: verdict.DefaultThresholds()}
-	got, _, err := b.Build(context.Background())
+	pass, err := b.Build(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(got) != 6 {
-		t.Fatalf("want 6 GPU jobs (the CPU-only job is filtered), got %d", len(got))
+	if len(pass.Reports) != 6 {
+		t.Fatalf("want 6 GPU jobs (the CPU-only job is filtered), pass.Reports %d", len(pass.Reports))
 	}
 
 	want := []struct {
@@ -218,9 +218,9 @@ func TestBuild(t *testing.T) {
 		{"oversized", verdict.Healthy, verdict.OverProvisioned},
 	}
 	for i, w := range want {
-		v := got[i].Verdict
-		if got[i].Job.Name != w.name {
-			t.Fatalf("report %d is %q, expected %q", i, got[i].Job.Name, w.name)
+		v := pass.Reports[i].Verdict
+		if pass.Reports[i].Job.Name != w.name {
+			t.Fatalf("report %d is %q, expected %q", i, pass.Reports[i].Job.Name, w.name)
 		}
 		if v.Activity != w.activity || v.Sizing != w.sizing {
 			t.Errorf("%s: got %s, want %s / %s", w.name, v.Summary(), w.activity, w.sizing)
@@ -229,23 +229,23 @@ func TestBuild(t *testing.T) {
 	}
 
 	// The zombie held one idle GPU for three hours.
-	if got[1].WastedH < 2.9 || got[1].WastedH > 3.1 {
-		t.Errorf("zombie wasted ≈3 GPU-hours, got %.2f", got[1].WastedH)
+	if pass.Reports[1].WastedH < 2.9 || pass.Reports[1].WastedH > 3.1 {
+		t.Errorf("zombie wasted ≈3 GPU-hours, pass.Reports %.2f", pass.Reports[1].WastedH)
 	}
 	// A job with no telemetry must never receive an all-clear.
-	if got[2].HasData || got[2].IsZombie() {
-		t.Errorf("no-telemetry job must be HasData=false and never zombie: %+v", got[2])
+	if pass.Reports[2].HasData || pass.Reports[2].IsZombie() {
+		t.Errorf("no-telemetry job must be HasData=false and never zombie: %+v", pass.Reports[2])
 	}
 	// Memory must be carried through as MiB plus a fraction of the card, and
 	// the card size must be derived rather than assumed.
-	if got[5].PeakMemMiB != 2*GiB || got[5].CapacityMiB != 15*GiB {
+	if pass.Reports[5].PeakMemMiB != 2*GiB || pass.Reports[5].CapacityMiB != 15*GiB {
 		t.Errorf("oversized job memory wrong: %.0f/%.0f MiB",
-			got[5].PeakMemMiB, got[5].CapacityMiB)
+			pass.Reports[5].PeakMemMiB, pass.Reports[5].CapacityMiB)
 	}
 
 	// The shared node. Before per-GPU scoping, the idle job read its
 	// neighbour's utilization and was never flagged.
-	idle, busy := got[3], got[4]
+	idle, busy := pass.Reports[3], pass.Reports[4]
 	if idle.PeakUtil != 0 {
 		t.Errorf("idle sharer read %.0f%% - telemetry is leaking from the neighbour's GPUs", idle.PeakUtil)
 	}
@@ -288,14 +288,14 @@ func TestEngineFaultGuard(t *testing.T) {
 	}
 	b := &Builder{Jobs: jobs, Prom: prom, Nodes: nodes, PodLabel: "exported_pod",
 		Thresholds: verdict.DefaultThresholds()}
-	got, _, err := b.Build(context.Background())
+	pass, err := b.Build(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(got) != 1 {
-		t.Fatalf("want 1 report, got %d", len(got))
+	if len(pass.Reports) != 1 {
+		t.Fatalf("want 1 report, pass.Reports %d", len(pass.Reports))
 	}
-	r := got[0]
+	r := pass.Reports[0]
 	if !r.EngineFaulted {
 		t.Errorf("engine flat everywhere while a GPU reads 97%% is a faulted sensor, not an idle fleet")
 	}
@@ -305,7 +305,7 @@ func TestEngineFaultGuard(t *testing.T) {
 	// The point of the guard: a signal we have decided not to believe must not
 	// be allowed to lower confidence either.
 	if r.Verdict.Confidence != verdict.ConfHigh {
-		t.Errorf("dropped signal must not downgrade the verdict, got %s", r.Verdict.Confidence)
+		t.Errorf("dropped signal must not downgrade the verdict, pass.Reports %s", r.Verdict.Confidence)
 	}
 	t.Logf("%s :: %s", r.Verdict.Summary(), r.Verdict.Reason())
 }
@@ -322,11 +322,11 @@ func TestEngineUnlitIsBelieved(t *testing.T) {
 	}
 	b := &Builder{Jobs: jobs, Prom: prom, Nodes: nodes, PodLabel: "exported_pod",
 		Thresholds: verdict.DefaultThresholds()}
-	got, _, err := b.Build(context.Background())
+	pass, err := b.Build(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	r := got[0]
+	r := pass.Reports[0]
 	if r.EngineFaulted {
 		t.Errorf("no GPU is busy, so a quiet engine is not evidence of a broken sensor")
 	}
@@ -334,7 +334,7 @@ func TestEngineUnlitIsBelieved(t *testing.T) {
 		t.Errorf("an optional signal must never change the finding: %s", r.Verdict.Summary())
 	}
 	if r.Verdict.Confidence != verdict.ConfLow {
-		t.Errorf("an uncorroborated utilization reading is low confidence, got %s", r.Verdict.Confidence)
+		t.Errorf("an uncorroborated utilization reading is low confidence, pass.Reports %s", r.Verdict.Confidence)
 	}
 	t.Logf("%s :: %s", r.Verdict.Summary(), r.Verdict.Reason())
 }
@@ -403,7 +403,7 @@ func TestWindowClampedToJobAge(t *testing.T) {
 	}
 	b := &Builder{Jobs: jobs, Prom: prom, Nodes: fakeNodes{"w-0": "pod-w-0"},
 		PodLabel: "exported_pod", Thresholds: verdict.DefaultThresholds()}
-	if _, _, err := b.Build(context.Background()); err != nil {
+	if _, err := b.Build(context.Background()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(seen) == 0 {
@@ -495,14 +495,14 @@ func TestQueueCountsOnlyResourceWaits(t *testing.T) {
 		{JobID: 7, State: []string{"COMPLETED"}, StateReason: "Resources", TresPerNode: "gres/gpu:4"},
 	}}
 	b := &Builder{Jobs: jobs, Nodes: fakeNodes{}, Prom: fakeProm{byGPU: map[string]gpu{}}}
-	_, q, err := b.Build(context.Background())
+	pass, err := b.Build(context.Background())
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	if q.PendingGPUJobs != 2 {
-		t.Errorf("only Resources waits for GPUs count, got %d", q.PendingGPUJobs)
+	if pass.Queue.PendingGPUJobs != 2 {
+		t.Errorf("only Resources waits for GPUs count, pass.Reports %d", pass.Queue.PendingGPUJobs)
 	}
-	if q.PendingGPUs != 3 {
-		t.Errorf("expected 2+1 devices waiting, got %d", q.PendingGPUs)
+	if pass.Queue.PendingGPUs != 3 {
+		t.Errorf("expected 2+1 devices waiting, pass.Reports %d", pass.Queue.PendingGPUs)
 	}
 }

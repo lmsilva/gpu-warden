@@ -164,11 +164,25 @@ func (b *Builder) podLabel() string {
 
 // Build produces one JobReport per running GPU job, and a summary of what the
 // queue is waiting for.
-func (b *Builder) Build(ctx context.Context) ([]JobReport, Queue, error) {
+// Pass is everything one read of Slurm produced: the joined per-job reports,
+// the queue pressure, and the full job list the reports were drawn from.
+//
+// Jobs is every job slurmrestd returned, in every state - including the ones
+// the reports deliberately leave out. The configuration engine checks jobs
+// that hold no card and jobs that have not started, so a pass that kept only
+// what the verdict table shows could not feed it, and a finding about a
+// pending job would have no name to print.
+type Pass struct {
+	Reports []JobReport
+	Queue   Queue
+	Jobs    []slurmapi.Job
+}
+
+func (b *Builder) Build(ctx context.Context) (Pass, error) {
 	th := b.thresholds()
 	all, err := b.Jobs.ListJobs(ctx)
 	if err != nil {
-		return nil, Queue{}, fmt.Errorf("listing jobs: %w", err)
+		return Pass{}, fmt.Errorf("listing jobs: %w", err)
 	}
 	// Split once. A job Slurm has finished with is neither running work nor
 	// waiting work, so it belongs to neither half.
@@ -194,17 +208,17 @@ func (b *Builder) Build(ctx context.Context) ([]JobReport, Queue, error) {
 	// Fail with a sentence, not a stack trace: an unattended tool should say
 	// what was misconfigured, and a nil NodeResolver panics deep inside Build.
 	if b.Nodes == nil {
-		return nil, Queue{}, fmt.Errorf("report.Builder.Nodes is nil: a NodeResolver is required")
+		return Pass{}, fmt.Errorf("report.Builder.Nodes is nil: a NodeResolver is required")
 	}
 	// One lookup per cycle, not per job.
 	nodeToPod, err := b.Nodes.PodNames(ctx)
 	if err != nil {
-		return nil, Queue{}, fmt.Errorf("resolving node-to-pod mapping: %w", err)
+		return Pass{}, fmt.Errorf("resolving node-to-pod mapping: %w", err)
 	}
 	// One fleet-level check per cycle, before any job is judged.
 	faulted, err := b.engineFaulted(ctx)
 	if err != nil {
-		return nil, Queue{}, fmt.Errorf("checking engine signal health: %w", err)
+		return Pass{}, fmt.Errorf("checking engine signal health: %w", err)
 	}
 	var out []JobReport
 	for _, j := range jobs {
@@ -214,7 +228,7 @@ func (b *Builder) Build(ctx context.Context) ([]JobReport, Queue, error) {
 		}
 		nodes, err := slurmapi.ExpandNodes(j.Nodes)
 		if err != nil {
-			return nil, Queue{}, fmt.Errorf("expanding nodes for job %d: %w", j.JobID, err)
+			return Pass{}, fmt.Errorf("expanding nodes for job %d: %w", j.JobID, err)
 		}
 		// Translate Slurm node names into pod names. A node absent from the map
 		// is skipped rather than fatal: a worker pod can be mid-restart.
@@ -241,7 +255,7 @@ func (b *Builder) Build(ctx context.Context) ([]JobReport, Queue, error) {
 
 		m, err := b.collect(ctx, targets, elapsed, hasStart, th, !faulted)
 		if err != nil {
-			return nil, Queue{}, fmt.Errorf("collecting telemetry for job %d: %w", j.JobID, err)
+			return Pass{}, fmt.Errorf("collecting telemetry for job %d: %w", j.JobID, err)
 		}
 
 		r := JobReport{
@@ -263,7 +277,7 @@ func (b *Builder) Build(ctx context.Context) ([]JobReport, Queue, error) {
 		r.Verdict = verdict.Judge(m, th)
 		out = append(out, r)
 	}
-	return out, q, nil
+	return Pass{Reports: out, Queue: q, Jobs: all}, nil
 }
 
 // target is one pod and, when known, the GPU device indices on it that belong

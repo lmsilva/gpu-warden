@@ -17,6 +17,7 @@ import (
 	"github.com/lmsilva/squire/internal/cross"
 	"github.com/lmsilva/squire/internal/lint"
 	"github.com/lmsilva/squire/internal/report"
+	"github.com/lmsilva/squire/internal/slurmapi"
 )
 
 // Snapshot is one pass's whole output. Reports and Queue travel together
@@ -26,6 +27,12 @@ type Snapshot struct {
 	Reports  []report.JobReport
 	Queue    report.Queue
 	Findings []lint.Finding
+
+	// Jobs is every job Slurm returned, not only the ones with cards in the
+	// reports above. A presenter never renders this list; it is here because
+	// a finding can be about a job the verdict table does not show, and that
+	// finding still has to be able to name it.
+	Jobs []slurmapi.Job
 
 	// At is when the pass finished, not when a caller asked for it. One
 	// snapshot is served to several callers over its cached life, and each
@@ -38,7 +45,7 @@ type Snapshot struct {
 // package does not depend on how the join is done and a test needs no
 // cluster.
 type Builder interface {
-	Build(ctx context.Context) ([]report.JobReport, report.Queue, error)
+	Build(ctx context.Context) (report.Pass, error)
 }
 
 // Build runs one pass and derives its findings.
@@ -48,18 +55,21 @@ type Builder interface {
 // no finding - the same ceiling the activity verdict uses, from the same
 // thresholds.
 func Build(ctx context.Context, b Builder, grace time.Duration) (Snapshot, error) {
-	reports, queue, err := b.Build(ctx)
+	pass, err := b.Build(ctx)
 	if err != nil {
 		return Snapshot{}, err
 	}
-	jobs := make([]cross.Job, 0, len(reports))
-	for _, r := range reports {
+	jobs := make([]cross.Job, 0, len(pass.Reports))
+	for _, r := range pass.Reports {
 		jobs = append(jobs, toCrossJob(r, grace))
 	}
 	findings := cross.CheckAll(jobs, cross.Queue{
-		PendingGPUJobs: queue.PendingGPUJobs, PendingGPUs: queue.PendingGPUs,
+		PendingGPUJobs: pass.Queue.PendingGPUJobs, PendingGPUs: pass.Queue.PendingGPUs,
 	})
-	return Snapshot{Reports: reports, Queue: queue, Findings: findings, At: time.Now()}, nil
+	return Snapshot{
+		Reports: pass.Reports, Queue: pass.Queue, Jobs: pass.Jobs,
+		Findings: findings, At: time.Now(),
+	}, nil
 }
 
 // toCrossJob adapts a finished report into the cross-source engine's input.
