@@ -115,7 +115,8 @@ func TestHTMLFindingsAndNotes(t *testing.T) {
 	s := wire.Snapshot{
 		Jobs: []wire.Job{unmeasured()},
 		Findings: []wire.Finding{{
-			JobID: 102, Rule: "gpu-requested-never-touched", Severity: "warn",
+			JobID: 102, JobName: "wrap", Kind: wire.KindAllocation,
+			Rule: "gpu-requested-never-touched", Severity: "warn",
 			Message: "its 1 GPU has done no work",
 		}},
 	}

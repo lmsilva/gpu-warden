@@ -178,11 +178,10 @@ footer { color: var(--muted); margin-top: 2.5rem; font-size: .85rem; }
 // page behind it, which reads as a Squire that has lost some jobs rather than
 // as an error.
 func HTML(w io.Writer, s wire.Snapshot, o HTMLOptions) error {
-	names := s.Names()
 	fs := make([]pageFinding, 0, len(s.Findings))
 	for _, f := range s.Findings {
 		fs = append(fs, pageFinding{
-			JobID: f.JobID, Name: names[f.JobID],
+			JobID: f.JobID, Name: f.JobName,
 			Severity: f.Severity, Rule: f.Rule, Message: f.Message,
 		})
 	}

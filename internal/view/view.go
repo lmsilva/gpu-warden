@@ -202,13 +202,12 @@ func findings(out io.Writer, s wire.Snapshot) {
 	if len(s.Findings) == 0 {
 		return
 	}
-	names := s.Names()
 	fmt.Fprintln(out)
 	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(w, "JOBID\tNAME\tSEVERITY\tRULE\tFINDING")
 	for _, f := range s.Findings {
 		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\n",
-			f.JobID, names[f.JobID], f.Severity, f.Rule, f.Message)
+			f.JobID, f.JobName, f.Severity, f.Rule, f.Message)
 	}
 	w.Flush()
 }

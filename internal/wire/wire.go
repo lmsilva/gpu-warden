@@ -100,9 +100,25 @@ type Memory struct {
 	PeakFrac    float64 `json:"peak_frac"`
 }
 
-// Finding is one finding, with the severity as its word.
+// Finding kinds. Two engines report findings and they are not the same kind
+// of claim: an allocation finding is about a job in the table above it, and a
+// configuration finding can be about a job that is not there at all - one
+// that holds no card, or has not started. A reader has to be able to tell
+// them apart, and so does a script.
+const (
+	KindAllocation    = "allocation"
+	KindConfiguration = "configuration"
+)
+
+// Finding is one finding, with the severity and the kind as their words.
+//
+// JobName travels with it. A finding can be about a job the jobs list does
+// not contain, so a consumer that tried to look the name up there would find
+// nothing - the document has to be readable on its own.
 type Finding struct {
 	JobID    int    `json:"job_id"`
+	JobName  string `json:"job_name"`
+	Kind     string `json:"kind"`
 	Rule     string `json:"rule"`
 	Severity string `json:"severity"`
 	Message  string `json:"message"`
@@ -126,11 +142,17 @@ func From(s cycle.Snapshot) Snapshot {
 			faulted = true
 		}
 	}
+	// Names come from the whole job list, not from the jobs above: a
+	// configuration finding can be about a job that holds no card.
+	names := make(map[int]string, len(s.Jobs))
+	for _, j := range s.Jobs {
+		names[j.JobID] = j.Name
+	}
 	findings := make([]Finding, 0, len(s.Findings))
 	for _, f := range s.Findings {
 		findings = append(findings, Finding{
-			JobID: f.JobID, Rule: f.Rule,
-			Severity: f.Severity.String(), Message: f.Message,
+			JobID: f.JobID, JobName: names[f.JobID], Kind: KindAllocation,
+			Rule: f.Rule, Severity: f.Severity.String(), Message: f.Message,
 		})
 	}
 	return Snapshot{
@@ -212,17 +234,6 @@ func Encode(w io.Writer, s Snapshot) error {
 	}
 	_, err = w.Write(b)
 	return err
-}
-
-// Names maps job id to job name. Findings carry an id and no name, so every
-// presenter needs this to label a row - once, here, rather than three
-// slightly different loops.
-func (s Snapshot) Names() map[int]string {
-	names := make(map[int]string, len(s.Jobs))
-	for _, j := range s.Jobs {
-		names[j.ID] = j.Name
-	}
-	return names
 }
 
 // PodWide reports whether any job's telemetry covered more than its own

@@ -159,7 +159,8 @@ func TestFindingsBlock(t *testing.T) {
 	s := wire.Snapshot{
 		Jobs: []wire.Job{busy()},
 		Findings: []wire.Finding{{
-			JobID: 101, Rule: "partially-used-allocation", Severity: "warn",
+			JobID: 101, JobName: "train", Kind: wire.KindAllocation,
+			Rule: "partially-used-allocation", Severity: "warn",
 			Message: "holds 2 GPUs but only 1 has done any work",
 		}},
 	}

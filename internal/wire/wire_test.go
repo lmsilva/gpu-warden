@@ -175,13 +175,47 @@ func TestFindingsCrossWithTheirWords(t *testing.T) {
 	}
 }
 
-// TestNames mirrors the lookup the presenters need: findings carry an id and
-// no name.
-func TestNames(t *testing.T) {
-	s := From(cycle.Snapshot{Reports: []report.JobReport{measured(), unmeasured()}})
-	names := s.Names()
-	if names[101] != "train" || names[102] != "wrap" {
-		t.Errorf("names lookup wrong: %v", names)
+// TestFindingsCarryTheirOwnName: a finding can be about a job the jobs list
+// does not contain - a pending one, or one holding no card - so the name
+// travels with the finding rather than being looked up in a list that may
+// not have it.
+func TestFindingsCarryTheirOwnName(t *testing.T) {
+	s := From(cycle.Snapshot{
+		Reports: []report.JobReport{measured()},
+		Jobs: []slurmapi.Job{
+			{JobID: 101, Name: "train"},
+			{JobID: 999, Name: "pending-cpu-job"},
+		},
+		Findings: []lint.Finding{
+			{JobID: 101, Rule: "a", Severity: lint.Warn, Message: "in the table"},
+			{JobID: 999, Rule: "b", Severity: lint.Note, Message: "not in the table"},
+		},
+	})
+	if s.Findings[0].JobName != "train" {
+		t.Errorf("want the job's name, got %q", s.Findings[0].JobName)
+	}
+	if s.Findings[1].JobName != "pending-cpu-job" {
+		t.Errorf("a finding about a job outside the table still names it, got %q",
+			s.Findings[1].JobName)
+	}
+	// A name Slurm never sent stays empty rather than being invented.
+	orphan := From(cycle.Snapshot{
+		Findings: []lint.Finding{{JobID: 5, Rule: "c", Severity: lint.Warn}},
+	})
+	if orphan.Findings[0].JobName != "" {
+		t.Errorf("an unknown job must not gain a name, got %q", orphan.Findings[0].JobName)
+	}
+}
+
+// TestFindingsSayWhichEngine: the two engines make different kinds of claim,
+// so every finding says which one it came from - the page groups on it and a
+// script can filter on it.
+func TestFindingsSayWhichEngine(t *testing.T) {
+	s := From(cycle.Snapshot{
+		Findings: []lint.Finding{{JobID: 1, Rule: "a", Severity: lint.Warn}},
+	})
+	if s.Findings[0].Kind != KindAllocation {
+		t.Errorf("a cross-source finding is an allocation finding, got %q", s.Findings[0].Kind)
 	}
 }
 
