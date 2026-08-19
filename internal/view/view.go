@@ -8,6 +8,12 @@
 // and the first symptom would be a page and a table disagreeing about the
 // same job in front of the person trying to explain it.
 //
+// What they render is the wire shape - the published form of a pass, not the
+// internal one. A renderer reading richer internal data would know things a
+// consumer of the published document could not, and the difference would
+// surface as two tools disagreeing about the same job. The renderers reading
+// the published shape is what proves the shape publishes enough.
+//
 // Neither renderer judges anything. The verdicts and findings arrive already
 // decided in the snapshot.
 package view
@@ -20,9 +26,7 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/lmsilva/squire/internal/cycle"
-	"github.com/lmsilva/squire/internal/report"
-	"github.com/lmsilva/squire/internal/verdict"
+	"github.com/lmsilva/squire/internal/wire"
 )
 
 // TableOptions are the terminal renderer's settings.
@@ -57,70 +61,85 @@ type row struct {
 }
 
 // rows renders every job in the snapshot.
-func rows(s cycle.Snapshot, dollarRate float64) []row {
-	out := make([]row, 0, len(s.Reports))
-	for _, r := range s.Reports {
-		out = append(out, toRow(r, dollarRate))
+func rows(s wire.Snapshot, dollarRate float64) []row {
+	out := make([]row, 0, len(s.Jobs))
+	for _, j := range s.Jobs {
+		out = append(out, toRow(j, dollarRate))
 	}
 	return out
 }
 
-func toRow(r report.JobReport, dollarRate float64) row {
-	v := r.Verdict
+// sizingWords is the one place the machine vocabulary becomes the table's
+// phrasing. The wire says right_sized because the sizing metric already
+// does, and two machine surfaces must not spell one enum two ways; how to
+// say it to a person is this renderer's decision alone.
+var sizingWords = map[string]string{
+	"unknown":           "-",
+	"right_sized":       "right-sized",
+	"over_provisioned":  "over-provisioned",
+	"under_provisioned": "possibly under-provisioned",
+}
 
+func sizingWord(code string) string {
+	if w, ok := sizingWords[code]; ok {
+		return w
+	}
+	// A state this renderer predates. The raw code is better than a dash
+	// that would claim nothing was decided.
+	return code
+}
+
+func toRow(j wire.Job, dollarRate float64) row {
 	// Activity carries its confidence inline ("zombie:high"); a verdict
 	// without one (analyzing) prints bare.
-	activity := v.Activity.String()
-	if v.Confidence != verdict.ConfNone {
-		activity += ":" + v.Confidence.String()
-	}
-	sizing := "-"
-	if v.Sizing != verdict.SizingUnknown {
-		sizing = v.Sizing.String()
+	activity := j.Activity
+	if j.Confidence != nil {
+		activity += ":" + *j.Confidence
 	}
 	mem := "-"
-	if r.CapacityMiB > 0 {
+	if m := j.Memory; m != nil {
 		mem = fmt.Sprintf("%.1f/%.0fG (%.0f%%)",
-			r.PeakMemMiB/1024, r.CapacityMiB/1024, r.PeakMemFrac*100)
+			m.PeakMiB/1024, m.CapacityMiB/1024, m.PeakFrac*100)
 	}
-	// Utilization, and the waste derived from it, exist only when telemetry
-	// was actually read. HasData false means the queries came back empty, so
-	// these three would otherwise print definite zeros for numbers that were
-	// never measured - the same lie in three columns.
+	// Null on the wire is a dash on the row: a value that was never read
+	// must not be mistakable for a value that was read as zero, and a
+	// column of numbers cannot say "unknown" any other way.
 	avg, peak, wasted := "-", "-", "-"
-	if r.HasData {
-		avg = fmt.Sprintf("%.0f", r.AvgUtil)
-		peak = fmt.Sprintf("%.0f", r.PeakUtil)
-		wasted = fmt.Sprintf("%.1f", r.WastedH)
+	if j.AvgUtilPct != nil {
+		avg = fmt.Sprintf("%.0f", *j.AvgUtilPct)
+	}
+	if j.PeakUtilPct != nil {
+		peak = fmt.Sprintf("%.0f", *j.PeakUtilPct)
+	}
+	if j.WastedGPUHours != nil {
+		wasted = fmt.Sprintf("%.1f", *j.WastedGPUHours)
 		if dollarRate > 0 {
-			wasted = fmt.Sprintf("%.1f ($%.2f)", r.WastedH, r.WastedH*dollarRate)
+			wasted = fmt.Sprintf("%.1f ($%.2f)",
+				*j.WastedGPUHours, *j.WastedGPUHours*dollarRate)
 		}
 	}
 	// A job whose telemetry could not be scoped to its own GPU devices is
 	// marked, because on a shared node those numbers include a neighbour's
 	// work. Silently printing them as if they were the job's own is the
 	// failure this marker exists to prevent.
-	gpus := strconv.Itoa(r.GPUs)
-	if !r.PerGPU {
+	gpus := strconv.Itoa(j.GPUs)
+	if !j.PerGPU {
 		gpus += "*"
 	}
-	// A dash rather than a zero for both: an unmeasured signal and a
-	// measured zero mean opposite things, and a column of numbers cannot
-	// say "unknown".
 	lit := "-"
-	if r.HasLit {
-		lit = strconv.Itoa(r.LitGPUs)
+	if j.LitGPUs != nil {
+		lit = strconv.Itoa(*j.LitGPUs)
 	}
 	firstWork := "-"
-	if r.HasFirstWork {
-		firstWork = r.FirstWorkAfter.Round(time.Second).String()
+	if j.FirstWorkAfterSeconds != nil {
+		firstWork = (time.Duration(*j.FirstWorkAfterSeconds) * time.Second).String()
 	}
 	return row{
-		JobID:   r.Job.JobID,
-		Name:    r.Job.Name,
-		User:    r.Job.Owner(),
+		JobID:   j.ID,
+		Name:    j.Name,
+		User:    j.User,
 		GPUs:    gpus,
-		Elapsed: r.Elapsed.Round(time.Minute).String(),
+		Elapsed: (time.Duration(j.ElapsedSeconds) * time.Second).Round(time.Minute).String(),
 		Avg:     avg,
 		Peak:    peak,
 		Mem:     mem,
@@ -129,32 +148,9 @@ func toRow(r report.JobReport, dollarRate float64) row {
 		// order: what the GPU is doing, then anything that argued with it,
 		// then sizing. The first alone can assert over-provisioned and never
 		// say on what evidence.
-		Activity: activity, State: v.Activity.String(), Sizing: sizing,
-		Lit: lit, FirstWork: firstWork, Why: strings.Join(v.Reasons, "; "),
+		Activity: activity, State: j.Activity, Sizing: sizingWord(j.Sizing),
+		Lit: lit, FirstWork: firstWork, Why: strings.Join(j.Reasons, "; "),
 	}
-}
-
-// podWide reports whether any job's telemetry covered more than its own
-// devices, which is what the * marker in the GPUS column stands for.
-func podWide(s cycle.Snapshot) bool {
-	for _, r := range s.Reports {
-		if !r.PerGPU {
-			return true
-		}
-	}
-	return false
-}
-
-// engineFaulted reports whether the engine signal was dropped this pass. It
-// is a fleet-level judgement, so every report in a pass carries the same
-// answer.
-func engineFaulted(s cycle.Snapshot) bool {
-	for _, r := range s.Reports {
-		if r.EngineFaulted {
-			return true
-		}
-	}
-	return false
 }
 
 const (
@@ -165,7 +161,7 @@ const (
 
 // Table renders a pass as a top-style table: one column per verdict axis,
 // the findings under it, and any caveat that applies to the whole pass.
-func Table(out io.Writer, s cycle.Snapshot, o TableOptions) {
+func Table(out io.Writer, s wire.Snapshot, o TableOptions) {
 	// tabwriter buffers: nothing prints until Flush.
 	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 	header := "JOBID\tNAME\tUSER\tGPUS\tELAPSED\tAVG%\tPEAK%\tGPU-MEM\tWASTED-GPU-H\tACTIVITY\tSIZING"
@@ -186,10 +182,10 @@ func Table(out io.Writer, s cycle.Snapshot, o TableOptions) {
 		fmt.Fprintln(w)
 	}
 	w.Flush()
-	if podWide(s) {
+	if s.PodWide() {
 		fmt.Fprintln(out, "\n"+podWideNote)
 	}
-	if engineFaulted(s) {
+	if s.EngineFaulted {
 		fmt.Fprintln(out, "\nnote: "+faultedNote)
 	}
 	findings(out, s)
@@ -202,7 +198,7 @@ func Table(out io.Writer, s cycle.Snapshot, o TableOptions) {
 // have. Widening every row for something few of them carry would cost the
 // table its shape. The columns match squire-lint's, so a reader who has seen
 // one recognises the other.
-func findings(out io.Writer, s cycle.Snapshot) {
+func findings(out io.Writer, s wire.Snapshot) {
 	if len(s.Findings) == 0 {
 		return
 	}

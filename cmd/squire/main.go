@@ -22,6 +22,7 @@ import (
 	"github.com/lmsilva/squire/internal/slurmcfg"
 	"github.com/lmsilva/squire/internal/verdict"
 	"github.com/lmsilva/squire/internal/view"
+	"github.com/lmsilva/squire/internal/wire"
 )
 
 // cycleTimeout bounds one build of the reports, in either mode. The server's
@@ -269,7 +270,7 @@ func main() {
 				return
 			}
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			if err := view.HTML(w, got, view.HTMLOptions{
+			if err := view.HTML(w, wire.From(got), view.HTMLOptions{
 				DollarRate: c.dollarRate,
 				Version:    buildinfo.Version,
 				Refresh:    pageRefresh(c.serveCache),
@@ -319,7 +320,7 @@ func main() {
 			if c.watch > 0 {
 				fmt.Printf("\n=== %s ===\n", time.Now().Format("15:04:05"))
 			}
-			view.Table(os.Stdout, got, view.TableOptions{
+			view.Table(os.Stdout, wire.From(got), view.TableOptions{
 				Wide: c.wide, DollarRate: c.dollarRate,
 			})
 		}

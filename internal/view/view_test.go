@@ -3,53 +3,41 @@ package view
 import (
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/lmsilva/squire/internal/cycle"
-	"github.com/lmsilva/squire/internal/lint"
-	"github.com/lmsilva/squire/internal/report"
-	"github.com/lmsilva/squire/internal/slurmapi"
-	"github.com/lmsilva/squire/internal/verdict"
+	"github.com/lmsilva/squire/internal/wire"
 )
 
+func ptr[T any](v T) *T { return &v }
+
 // busy is a healthy job with every optional signal measured.
-func busy() report.JobReport {
-	return report.JobReport{
-		Job:         slurmapi.Job{JobID: 101, Name: "train", UserName: "ana", Partition: "all"},
-		GPUs:        2,
-		Elapsed:     90 * time.Minute,
-		AvgUtil:     94,
-		PeakUtil:    100,
-		PeakMemMiB:  4096,
-		CapacityMiB: 15095,
-		PeakMemFrac: 0.27,
-		WastedH:     0.2,
-		HasData:     true,
-		PerGPU:      true,
-		HasLit:      true, LitGPUs: 2,
-		HasFirstWork: true, FirstWorkAfter: 58 * time.Second,
-		Verdict: verdict.Verdict{
-			Activity: verdict.Healthy, Sizing: verdict.RightSized,
-			Confidence: verdict.ConfMedium,
-			Reasons:    []string{"peak 100% over 30m0s", "avg 94% since start"},
-		},
+func busy() wire.Job {
+	return wire.Job{
+		ID: 101, Name: "train", User: "ana", Partition: "all",
+		GPUs: 2, PerGPU: true,
+		ElapsedSeconds: 5400,
+		AvgUtilPct:     ptr(94.0), PeakUtilPct: ptr(100.0),
+		WastedGPUHours: ptr(0.2),
+		Memory:         &wire.Memory{PeakMiB: 4096, CapacityMiB: 15095, PeakFrac: 0.27},
+		LitGPUs:        ptr(2), FirstWorkAfterSeconds: ptr(int64(58)),
+		Activity: "healthy", Confidence: ptr("medium"), Sizing: "right_sized",
+		Reasons: []string{"peak 100% over 30m0s", "avg 94% since start"},
 	}
 }
 
-// unmeasured is the case the dash exists for: no telemetry scoped to the
-// job's own devices, and no lit or first-work reading at all.
-func unmeasured() report.JobReport {
-	return report.JobReport{
-		Job:     slurmapi.Job{JobID: 102, Name: "wrap", UserName: "bo"},
-		GPUs:    1,
-		Elapsed: 2 * time.Minute,
-		Verdict: verdict.Verdict{Activity: verdict.Analyzing},
+// unmeasured is the case the dash exists for: nothing optional was read, so
+// every measurement is null on the wire.
+func unmeasured() wire.Job {
+	return wire.Job{
+		ID: 102, Name: "wrap", User: "bo",
+		GPUs: 1, ElapsedSeconds: 120,
+		Activity: "analyzing", Sizing: "unknown",
+		Reasons: []string{},
 	}
 }
 
 func TestTableColumns(t *testing.T) {
 	var sb strings.Builder
-	Table(&sb, cycle.Snapshot{Reports: []report.JobReport{busy()}}, TableOptions{})
+	Table(&sb, wire.Snapshot{Jobs: []wire.Job{busy()}}, TableOptions{})
 	out := sb.String()
 
 	for _, want := range []string{"JOBID", "ACTIVITY", "SIZING", "101", "train", "ana",
@@ -68,7 +56,7 @@ func TestTableColumns(t *testing.T) {
 
 func TestTableWideShowsEveryReason(t *testing.T) {
 	var sb strings.Builder
-	Table(&sb, cycle.Snapshot{Reports: []report.JobReport{busy()}}, TableOptions{Wide: true})
+	Table(&sb, wire.Snapshot{Jobs: []wire.Job{busy()}}, TableOptions{Wide: true})
 	out := sb.String()
 
 	// Both reasons, not just the first. The first alone can assert a sizing
@@ -97,8 +85,8 @@ func TestUnmeasuredReadsAsADash(t *testing.T) {
 	if r.Sizing != "-" {
 		t.Errorf("an undecided sizing axis must be a dash, got %q", r.Sizing)
 	}
-	// Utilization and its derived waste share the rule: no telemetry read
-	// means no numbers, in all three columns at once.
+	// Utilization and its derived waste share the rule: null on the wire is
+	// a dash on the row, never a zero.
 	if r.Avg != "-" {
 		t.Errorf("unread utilization must be a dash, got %q", r.Avg)
 	}
@@ -111,14 +99,31 @@ func TestUnmeasuredReadsAsADash(t *testing.T) {
 
 	// And a measured zero is a number, not a dash.
 	lit0 := unmeasured()
-	lit0.HasLit = true
+	lit0.LitGPUs = ptr(0)
 	if got := toRow(lit0, 0).Lit; got != "0" {
 		t.Errorf("a measured zero must print as 0, got %q", got)
 	}
 	data0 := unmeasured()
-	data0.HasData = true
+	data0.AvgUtilPct = ptr(0.0)
+	data0.WastedGPUHours = ptr(0.0)
 	if got := toRow(data0, 0); got.Avg != "0" || got.Wasted != "0.0" {
 		t.Errorf("measured zeros must print as numbers, got avg %q wasted %q", got.Avg, got.Wasted)
+	}
+}
+
+// TestSizingSpeaksHuman pins the display map. The wire says right_sized
+// because the sizing metric does; a person reads a phrase. And a code this
+// renderer does not know prints as itself, rather than as a dash that would
+// claim nothing was decided.
+func TestSizingSpeaksHuman(t *testing.T) {
+	j := unmeasured()
+	j.Sizing = "under_provisioned"
+	if got := toRow(j, 0).Sizing; got != "possibly under-provisioned" {
+		t.Errorf("want the table's phrasing, got %q", got)
+	}
+	j.Sizing = "half_lit"
+	if got := toRow(j, 0).Sizing; got != "half_lit" {
+		t.Errorf("an unknown code must pass through, got %q", got)
 	}
 }
 
@@ -133,7 +138,7 @@ func TestPodWideIsMarked(t *testing.T) {
 	}
 
 	var sb strings.Builder
-	Table(&sb, cycle.Snapshot{Reports: []report.JobReport{unmeasured()}}, TableOptions{})
+	Table(&sb, wire.Snapshot{Jobs: []wire.Job{unmeasured()}}, TableOptions{})
 	if !strings.Contains(sb.String(), podWideNote) {
 		t.Errorf("the marker needs its footnote:\n%s", sb.String())
 	}
@@ -151,10 +156,10 @@ func TestDollarRateIsOptional(t *testing.T) {
 }
 
 func TestFindingsBlock(t *testing.T) {
-	s := cycle.Snapshot{
-		Reports: []report.JobReport{busy()},
-		Findings: []lint.Finding{{
-			JobID: 101, Rule: "partially-used-allocation", Severity: lint.Warn,
+	s := wire.Snapshot{
+		Jobs: []wire.Job{busy()},
+		Findings: []wire.Finding{{
+			JobID: 101, Rule: "partially-used-allocation", Severity: "warn",
 			Message: "holds 2 GPUs but only 1 has done any work",
 		}},
 	}
@@ -175,7 +180,7 @@ func TestFindingsBlock(t *testing.T) {
 // findings header would read as a section the reader has to check.
 func TestNoFindingsPrintsNothingExtra(t *testing.T) {
 	var sb strings.Builder
-	Table(&sb, cycle.Snapshot{Reports: []report.JobReport{busy()}}, TableOptions{})
+	Table(&sb, wire.Snapshot{Jobs: []wire.Job{busy()}}, TableOptions{})
 	if strings.Contains(sb.String(), "SEVERITY") {
 		t.Errorf("no findings must mean no findings block:\n%s", sb.String())
 	}

@@ -34,17 +34,6 @@ type Snapshot struct {
 	At time.Time
 }
 
-// Names maps job id to job name. Findings carry an id and no name, so every
-// presenter needs this to label a row - once, here, rather than three
-// slightly different loops.
-func (s Snapshot) Names() map[int]string {
-	names := make(map[int]string, len(s.Reports))
-	for _, r := range s.Reports {
-		names[r.Job.JobID] = r.Job.Name
-	}
-	return names
-}
-
 // Builder is what a pass reads from. A consumer-defined interface, so this
 // package does not depend on how the join is done and a test needs no
 // cluster.

@@ -113,20 +113,6 @@ func TestBuildPassesTheErrorThrough(t *testing.T) {
 	}
 }
 
-func TestNames(t *testing.T) {
-	s := Snapshot{Reports: []report.JobReport{
-		{Job: slurmapi.Job{JobID: 1, Name: "train"}},
-		{Job: slurmapi.Job{JobID: 2, Name: "sleep"}},
-	}}
-	names := s.Names()
-	if names[1] != "train" || names[2] != "sleep" {
-		t.Errorf("want the job names by id, got %v", names)
-	}
-	if _, ok := names[3]; ok {
-		t.Error("a job that was not in the snapshot must not appear")
-	}
-}
-
 // fixedSnapshot is a stand-in pass. Its contents do not matter; only how many
 // times the source ran does.
 func fixedSnapshot() Snapshot {

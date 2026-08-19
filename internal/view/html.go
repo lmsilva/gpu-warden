@@ -7,7 +7,7 @@ import (
 	"io"
 	"time"
 
-	"github.com/lmsilva/squire/internal/cycle"
+	"github.com/lmsilva/squire/internal/wire"
 )
 
 // HTMLOptions are the web renderer's settings.
@@ -177,13 +177,13 @@ footer { color: var(--muted); margin-top: 2.5rem; font-size: .85rem; }
 // fails halfway through would otherwise leave a 200 already sent and half a
 // page behind it, which reads as a Squire that has lost some jobs rather than
 // as an error.
-func HTML(w io.Writer, s cycle.Snapshot, o HTMLOptions) error {
+func HTML(w io.Writer, s wire.Snapshot, o HTMLOptions) error {
 	names := s.Names()
 	fs := make([]pageFinding, 0, len(s.Findings))
 	for _, f := range s.Findings {
 		fs = append(fs, pageFinding{
 			JobID: f.JobID, Name: names[f.JobID],
-			Severity: f.Severity.String(), Rule: f.Rule, Message: f.Message,
+			Severity: f.Severity, Rule: f.Rule, Message: f.Message,
 		})
 	}
 
@@ -197,10 +197,10 @@ func HTML(w io.Writer, s cycle.Snapshot, o HTMLOptions) error {
 	if !s.At.IsZero() {
 		p.At = s.At.Format("15:04:05 MST")
 	}
-	if podWide(s) {
+	if s.PodWide() {
 		p.PodWide = podWideNote
 	}
-	if engineFaulted(s) {
+	if s.EngineFaulted {
 		p.Faulted = "Note: " + faultedNote
 	}
 
@@ -215,7 +215,7 @@ func HTML(w io.Writer, s cycle.Snapshot, o HTMLOptions) error {
 // waiting states the queue pressure either way. A dashboard needs to tell
 // "nobody is waiting" from "this number is missing", and on a page the
 // difference has to be said in words rather than implied by a zero.
-func waiting(s cycle.Snapshot) string {
+func waiting(s wire.Snapshot) string {
 	q := s.Queue
 	if q.PendingGPUJobs == 0 {
 		return "Nothing is waiting for a GPU."
