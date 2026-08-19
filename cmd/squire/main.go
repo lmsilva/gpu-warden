@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
@@ -186,6 +187,21 @@ func parseConfig(args []string) config {
 	return c
 }
 
+// parseUID reads the optional uid query parameter. Absent means the whole
+// cluster. Present, it must be a whole non-negative number - and 0 is a
+// legitimate owner, root, not an absence. The error text is the 400 body.
+func parseUID(q url.Values) (uid int, filter bool, err error) {
+	raw := q.Get("uid")
+	if raw == "" {
+		return 0, false, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 {
+		return 0, false, fmt.Errorf("uid must be a non-negative integer, got %q", raw)
+	}
+	return n, true, nil
+}
+
 func main() {
 	// Answered before anything is parsed or built: a binary that cannot start
 	// should still be able to say what it is.
@@ -279,6 +295,37 @@ func main() {
 			}
 		})
 
+		// The same pass, as a document: everything the table and the page
+		// show, in the wire shape, out of the same cache. ?uid= narrows it
+		// to one owner's jobs. Nothing verifies the caller is that uid -
+		// today the filter is a convenience, not a boundary - but because
+		// the narrowing happens on this side of the wire, authentication
+		// can go in front of it later without the URL, the shape or the
+		// client changing.
+		mux.HandleFunc("GET /snapshot.json", func(w http.ResponseWriter, r *http.Request) {
+			uid, filter, err := parseUID(r.URL.Query())
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			ctx, cancel := context.WithTimeout(r.Context(), cycleTimeout)
+			defer cancel()
+			got, err := cached.Snapshot(ctx)
+			if err != nil {
+				// The same sentence the other two surfaces return.
+				http.Error(w, fmt.Sprintf("building reports: %v", err), http.StatusInternalServerError)
+				return
+			}
+			s := wire.From(got)
+			if filter {
+				s = s.ForUID(uid)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if err := wire.Encode(w, s); err != nil {
+				fmt.Println("error: encoding the snapshot:", err)
+			}
+		})
+
 		// Explicit timeouts. without them, ListenAndServe leaves all of these at zero,
 		// meaning no limit, so a client sending headers slowly can hold a
 		// connection open forever.
@@ -290,7 +337,7 @@ func main() {
 			WriteTimeout:      cycleTimeout + 60*time.Second,
 			IdleTimeout:       60 * time.Second,
 		}
-		fmt.Println("serving /metrics and / on", c.serveAddr)
+		fmt.Println("serving /metrics, / and /snapshot.json on", c.serveAddr)
 		if err := srv.ListenAndServe(); err != nil {
 			fmt.Println("error:", err)
 			os.Exit(1)

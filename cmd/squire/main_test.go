@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 )
@@ -104,5 +105,40 @@ func TestServeCacheSetOnlyWhenNamed(t *testing.T) {
 	}
 	if !parseConfig([]string{"--serve-cache", "0"}).serveCacheSet {
 		t.Error("a zero value is a legitimate setting and must read as set")
+	}
+}
+
+// TestParseUID covers the one route parameter. Absent means the whole
+// cluster; 0 is root, an owner rather than an absence; and names are
+// rejected because the machine field is numeric - the display name is for
+// people.
+func TestParseUID(t *testing.T) {
+	cases := []struct {
+		query   string
+		uid     int
+		filter  bool
+		wantErr bool
+	}{
+		{"", 0, false, false},
+		{"uid=50000", 50000, true, false},
+		{"uid=0", 0, true, false},
+		{"uid=", 0, false, false}, // present but empty reads as absent
+		{"uid=-1", 0, false, true},
+		{"uid=ana", 0, false, true},
+		{"uid=1.5", 0, false, true},
+	}
+	for _, c := range cases {
+		q, err := url.ParseQuery(c.query)
+		if err != nil {
+			t.Fatalf("bad case %q: %v", c.query, err)
+		}
+		uid, filter, err := parseUID(q)
+		if (err != nil) != c.wantErr {
+			t.Errorf("%q: err = %v, want error %v", c.query, err, c.wantErr)
+			continue
+		}
+		if uid != c.uid || filter != c.filter {
+			t.Errorf("%q: got (%d, %v), want (%d, %v)", c.query, uid, filter, c.uid, c.filter)
+		}
 	}
 }

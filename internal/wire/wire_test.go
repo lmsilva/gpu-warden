@@ -265,3 +265,33 @@ func TestForUIDKeepsTheClusterFacts(t *testing.T) {
 		}
 	}
 }
+
+type countingWriter struct {
+	buf   strings.Builder
+	calls int
+}
+
+func (w *countingWriter) Write(p []byte) (int, error) {
+	w.calls++
+	return w.buf.Write(p)
+}
+
+// TestEncodeWritesOnce: the whole document in one Write. A marshal failure
+// must produce an error and zero bytes, never half a document - so the
+// rendering has to finish before the writing starts.
+func TestEncodeWritesOnce(t *testing.T) {
+	var w countingWriter
+	if err := Encode(&w, From(cycle.Snapshot{Reports: []report.JobReport{measured()}})); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if w.calls != 1 {
+		t.Errorf("want one write for the whole document, got %d", w.calls)
+	}
+	var s Snapshot
+	if err := json.Unmarshal([]byte(w.buf.String()), &s); err != nil {
+		t.Fatalf("the document must round-trip: %v", err)
+	}
+	if s.Schema != Schema || len(s.Jobs) != 1 || s.Jobs[0].User != "ana" {
+		t.Errorf("the document lost something on the way: %+v", s)
+	}
+}

@@ -18,6 +18,8 @@
 package wire
 
 import (
+	"encoding/json"
+	"io"
 	"time"
 
 	"github.com/lmsilva/squire/internal/cycle"
@@ -198,6 +200,19 @@ func reasons(rs []string) []string {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+// Encode writes a pass as JSON, whole or not at all. Marshalling to memory
+// first means a failure produces an error and zero bytes, never a torn
+// document a consumer half-parses - the same rule the HTML renderer keeps,
+// for the same reason.
+func Encode(w io.Writer, s Snapshot) error {
+	b, err := json.Marshal(s)
+	if err != nil {
+		return err
+	}
+	_, err = w.Write(b)
+	return err
+}
 
 // Names maps job id to job name. Findings carry an id and no name, so every
 // presenter needs this to label a row - once, here, rather than three
