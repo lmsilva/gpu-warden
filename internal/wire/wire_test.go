@@ -194,3 +194,74 @@ func TestPodWide(t *testing.T) {
 		t.Error("one node-wide job must mark the pass")
 	}
 }
+
+// TestForUIDKeepsOnlyTheOwner: the filter matches the numeric uid, never the
+// display name, and a job with no uid matches nobody - better to hide a job
+// from its owner than to show it to someone else.
+func TestForUIDKeepsOnlyTheOwner(t *testing.T) {
+	mine := measured()
+	theirs := measured()
+	theirs.Job.JobID = 200
+	theirs.Job.UserID = slurmapi.NoVal{Set: true, Number: 50001}
+	nobody := unmeasured() // no uid at all
+
+	s := From(cycle.Snapshot{Reports: []report.JobReport{mine, theirs, nobody}})
+	got := s.ForUID(50000)
+	if len(got.Jobs) != 1 || got.Jobs[0].ID != 101 {
+		t.Fatalf("want job 101 alone, got %+v", got.Jobs)
+	}
+
+	// uid 0 is root, a legitimate owner - absent is what never matches.
+	if got := s.ForUID(0); len(got.Jobs) != 0 {
+		t.Errorf("no job here is root's, got %+v", got.Jobs)
+	}
+}
+
+// TestForUIDFollowsTheFindings: a finding about a filtered-out job would name
+// a job the document does not show.
+func TestForUIDFollowsTheFindings(t *testing.T) {
+	mine := measured()
+	theirs := measured()
+	theirs.Job.JobID = 200
+	theirs.Job.UserID = slurmapi.NoVal{Set: true, Number: 50001}
+
+	s := From(cycle.Snapshot{
+		Reports: []report.JobReport{mine, theirs},
+		Findings: []lint.Finding{
+			{JobID: 101, Rule: "a", Severity: lint.Note, Message: "kept"},
+			{JobID: 200, Rule: "b", Severity: lint.Warn, Message: "dropped"},
+		},
+	})
+	got := s.ForUID(50000)
+	if len(got.Findings) != 1 || got.Findings[0].JobID != 101 {
+		t.Errorf("want the finding about job 101 alone, got %+v", got.Findings)
+	}
+}
+
+// TestForUIDKeepsTheClusterFacts: the queue, the timestamp and the engine
+// caveat are about the pass, so filtering to one owner leaves them alone -
+// and an owner with nothing running still gets a valid document with empty
+// lists.
+func TestForUIDKeepsTheClusterFacts(t *testing.T) {
+	bad := measured()
+	bad.EngineFaulted = true
+	s := From(cycle.Snapshot{
+		Reports: []report.JobReport{bad},
+		Queue:   report.Queue{PendingGPUJobs: 2, PendingGPUs: 9},
+		At:      time.Date(2026, 8, 18, 14, 5, 9, 0, time.UTC),
+	})
+
+	got := s.ForUID(99999)
+	if got.Queue != s.Queue || !got.At.Equal(s.At) || !got.EngineFaulted || got.Schema != Schema {
+		t.Errorf("cluster facts must survive the filter: %+v", got)
+	}
+	b, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, want := range []string{`"jobs":[]`, `"findings":[]`} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("an emptied pass must still carry %s:\n%s", want, b)
+		}
+	}
+}

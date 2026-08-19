@@ -220,3 +220,31 @@ func (s Snapshot) PodWide() bool {
 	}
 	return false
 }
+
+// ForUID narrows a pass to one owner's jobs, and the findings about them.
+// The cluster-level facts stay: the queue, the timestamp and the engine
+// caveat describe the pass rather than a job, and "2 jobs waiting for 9
+// GPUs" beside your own idle allocation is half the point of looking.
+//
+// Matching is on the numeric uid alone - the display name is for people. A
+// job whose uid Slurm did not send matches nobody: showing a job to the
+// wrong person is the failure this filter exists to prevent, and an unknown
+// owner cannot be shown to be the right one.
+func (s Snapshot) ForUID(uid int) Snapshot {
+	out := s
+	out.Jobs = make([]Job, 0, len(s.Jobs))
+	kept := make(map[int]bool, len(s.Jobs))
+	for _, j := range s.Jobs {
+		if j.UID != nil && *j.UID == uid {
+			out.Jobs = append(out.Jobs, j)
+			kept[j.ID] = true
+		}
+	}
+	out.Findings = make([]Finding, 0, len(s.Findings))
+	for _, f := range s.Findings {
+		if kept[f.JobID] {
+			out.Findings = append(out.Findings, f)
+		}
+	}
+	return out
+}
