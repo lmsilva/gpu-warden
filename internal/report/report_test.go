@@ -2,6 +2,7 @@ package report
 
 import (
 	"context"
+	"errors"
 	"regexp"
 	"slices"
 	"strings"
@@ -504,5 +505,64 @@ func TestQueueCountsOnlyResourceWaits(t *testing.T) {
 	}
 	if pass.Queue.PendingGPUs != 3 {
 		t.Errorf("expected 2+1 devices waiting, pass.Reports %d", pass.Queue.PendingGPUs)
+	}
+}
+
+// fakeCluster serves the node and partition lists, or fails on demand.
+type fakeCluster struct {
+	nodes []slurmapi.Node
+	parts []slurmapi.Partition
+	err   error
+}
+
+func (f fakeCluster) ListNodes(context.Context) ([]slurmapi.Node, error) {
+	return f.nodes, f.err
+}
+
+func (f fakeCluster) ListPartitions(context.Context) ([]slurmapi.Partition, error) {
+	return f.parts, f.err
+}
+
+// TestClusterReadIsOptional: the configuration rules that compare a request
+// against the hardware need nodes and partitions, and a failed read of them
+// must cost those rules rather than the whole pass. A monitoring run that
+// died because a partition list blinked would be worse than one that says
+// which rules it could not apply.
+func TestClusterReadIsOptional(t *testing.T) {
+	b := &Builder{
+		Jobs:  fakeJobs{},
+		Prom:  fakeProm{byGPU: map[string]gpu{}},
+		Nodes: fakeNodes{},
+	}
+	// No cluster reader at all.
+	pass, err := b.Build(context.Background())
+	if err != nil {
+		t.Fatalf("a pass without a cluster reader must still build: %v", err)
+	}
+	if !pass.ClusterUnread {
+		t.Error("no cluster reader means the cluster was not read, and that must be stated")
+	}
+
+	// A reader that fails.
+	b.Cluster = fakeCluster{err: errors.New("slurmrestd said no")}
+	pass, err = b.Build(context.Background())
+	if err != nil {
+		t.Fatalf("a failed cluster read must not fail the pass: %v", err)
+	}
+	if !pass.ClusterUnread || pass.Nodes != nil {
+		t.Errorf("a failed read leaves no cluster data and says so: %+v", pass.ClusterUnread)
+	}
+
+	// A reader that works.
+	b.Cluster = fakeCluster{
+		nodes: []slurmapi.Node{{Name: "a"}},
+		parts: []slurmapi.Partition{{Name: "batch"}},
+	}
+	pass, err = b.Build(context.Background())
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if pass.ClusterUnread || len(pass.Nodes) != 1 || len(pass.Partitions) != 1 {
+		t.Errorf("a good read must reach the pass: %+v", pass)
 	}
 }

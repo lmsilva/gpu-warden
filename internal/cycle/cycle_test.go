@@ -19,13 +19,21 @@ type fakeBuilder struct {
 	reports []report.JobReport
 	queue   report.Queue
 	jobs    []slurmapi.Job
-	err     error
-	calls   int
+	nodes   []slurmapi.Node
+	parts   []slurmapi.Partition
+	// clusterUnread mirrors what report.Build reports when the node and
+	// partition read failed.
+	clusterUnread bool
+	err           error
+	calls         int
 }
 
 func (f *fakeBuilder) Build(context.Context) (report.Pass, error) {
 	f.calls++
-	return report.Pass{Reports: f.reports, Queue: f.queue, Jobs: f.jobs}, f.err
+	return report.Pass{
+		Reports: f.reports, Queue: f.queue, Jobs: f.jobs,
+		Nodes: f.nodes, Partitions: f.parts, ClusterUnread: f.clusterUnread,
+	}, f.err
 }
 
 // idleHolder is a job past its grace period holding four GPUs with one lit -
@@ -338,5 +346,59 @@ func TestPassCarriesEveryJob(t *testing.T) {
 	}
 	if s.Jobs[1].Name != "pending-cpu-job" {
 		t.Errorf("a job outside the reports must keep its name, got %q", s.Jobs[1].Name)
+	}
+}
+
+// TestConfigurationFindingsJoinThePass: the same engine squire-lint runs now
+// runs inside the pass, over every job rather than only the ones with cards.
+// A job holding no GPU and a job that has not started are exactly the ones
+// the verdict table cannot show and this engine can judge.
+func TestConfigurationFindingsJoinThePass(t *testing.T) {
+	b := &fakeBuilder{
+		jobs: []slurmapi.Job{
+			// No time limit: a rule that reads the job's own spec.
+			{JobID: 7, Name: "cpu-job", Partition: "batch", State: []string{"RUNNING"}},
+		},
+		nodes: []slurmapi.Node{{Name: "a", Gres: "gpu:1"}},
+		parts: []slurmapi.Partition{{Name: "batch"}},
+	}
+	s, err := Build(context.Background(), b, time.Minute)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if len(s.ConfigFindings) == 0 {
+		t.Fatal("a job with no time limit must produce a configuration finding")
+	}
+	if s.ConfigFindings[0].JobID != 7 {
+		t.Errorf("the finding must name the job, got %+v", s.ConfigFindings[0])
+	}
+	// The allocation findings stay their own list: mixing them would lose
+	// the distinction both presenters render.
+	if len(s.Findings) != 0 {
+		t.Errorf("no reports means no allocation findings, got %+v", s.Findings)
+	}
+	if s.ClusterUnread {
+		t.Error("the cluster was read, so nothing may claim otherwise")
+	}
+}
+
+// TestUnreadClusterIsSaidNotSwallowed: without nodes and partitions the rules
+// that compare a request against the hardware cannot run. Reporting fewer
+// findings with no explanation would read as a clean cluster.
+func TestUnreadClusterIsSaidNotSwallowed(t *testing.T) {
+	b := &fakeBuilder{
+		jobs:          []slurmapi.Job{{JobID: 7, Name: "cpu-job", Partition: "batch", State: []string{"RUNNING"}}},
+		clusterUnread: true,
+	}
+	s, err := Build(context.Background(), b, time.Minute)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if !s.ClusterUnread {
+		t.Error("an unread cluster must be stated")
+	}
+	// The spec-only rules still run: silence would hide real problems.
+	if len(s.ConfigFindings) == 0 {
+		t.Error("spec-only rules must still run without cluster data")
 	}
 }

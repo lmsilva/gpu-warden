@@ -224,6 +224,7 @@ func main() {
 		Jobs:       sc,
 		Prom:       pc,
 		Nodes:      kc,
+		Cluster:    sc,
 		PodLabel:   c.podMetricLabel,
 		Thresholds: c.th,
 	}

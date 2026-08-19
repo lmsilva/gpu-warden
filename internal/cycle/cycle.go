@@ -18,15 +18,28 @@ import (
 	"github.com/lmsilva/squire/internal/lint"
 	"github.com/lmsilva/squire/internal/report"
 	"github.com/lmsilva/squire/internal/slurmapi"
+	"github.com/lmsilva/squire/internal/slurmfacts"
 )
 
 // Snapshot is one pass's whole output. Reports and Queue travel together
 // because a finding that crosses them would otherwise pair fresh reports with
 // a stale queue, or the reverse.
 type Snapshot struct {
-	Reports  []report.JobReport
-	Queue    report.Queue
-	Findings []lint.Finding
+	Reports []report.JobReport
+	Queue   report.Queue
+	// Findings are the allocation findings: what the cards did, drawn from
+	// the reports above. ConfigFindings are what jobs asked for, drawn from
+	// the whole job list. They stay apart because they are not the same
+	// claim - one is about a job in the verdict table, the other can be
+	// about a job that is not there at all.
+	Findings       []lint.Finding
+	ConfigFindings []lint.Finding
+
+	// ClusterUnread says the nodes and partitions could not be read, so the
+	// rules that compare a request against the hardware did not run. An
+	// unread signal and a measured absence are different facts, and a
+	// shorter list with no explanation reads as good news.
+	ClusterUnread bool
 
 	// Jobs is every job Slurm returned, not only the ones with cards in the
 	// reports above. A presenter never renders this list; it is here because
@@ -68,8 +81,27 @@ func Build(ctx context.Context, b Builder, grace time.Duration) (Snapshot, error
 	})
 	return Snapshot{
 		Reports: pass.Reports, Queue: pass.Queue, Jobs: pass.Jobs,
-		Findings: findings, At: time.Now(),
+		Findings: findings, ConfigFindings: configFindings(pass),
+		ClusterUnread: pass.ClusterUnread, At: time.Now(),
 	}, nil
+}
+
+// configFindings runs the configuration engine over every job in the pass.
+//
+// It is the same engine squire-lint runs, over the same translation, so the
+// page and the command line cannot report different things about one job.
+// Without cluster data the spec-only rules still run - the engine takes a nil
+// cluster and stays silent about what it cannot compare.
+func configFindings(pass report.Pass) []lint.Finding {
+	jobs := make([]lint.Job, 0, len(pass.Jobs))
+	for _, j := range pass.Jobs {
+		jobs = append(jobs, slurmfacts.Job(j))
+	}
+	var cluster *lint.Cluster
+	if !pass.ClusterUnread {
+		cluster = slurmfacts.Cluster(pass.Nodes, pass.Partitions)
+	}
+	return lint.CheckAll(jobs, cluster)
 }
 
 // toCrossJob adapts a finished report into the cross-source engine's input.

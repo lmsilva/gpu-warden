@@ -129,11 +129,24 @@ type NodeResolver interface {
 	PodNames(ctx context.Context) (map[string]string, error)
 }
 
+// ClusterLister is what the configuration rules need beyond the jobs: the
+// nodes and partitions a job's request is compared against. It is optional -
+// without it the rules that only read a job's own spec still run.
+type ClusterLister interface {
+	ListNodes(ctx context.Context) ([]slurmapi.Node, error)
+	ListPartitions(ctx context.Context) ([]slurmapi.Partition, error)
+}
+
 type Builder struct {
 	Jobs     JobLister
 	Prom     Querier
 	Nodes    NodeResolver
 	PodLabel string // DCGM label carrying the pod name, e.g. "exported_pod"
+
+	// Cluster reads the nodes and partitions the configuration rules compare
+	// a request against. Optional: a nil one, or a read that fails, leaves
+	// the spec-only rules running and says so rather than guessing.
+	Cluster ClusterLister
 
 	// Thresholds are the operator's globally-overridden knobs. A zero value
 	// means "use Squire's shipped defaults" - otherwise a caller that forgot
@@ -176,6 +189,14 @@ type Pass struct {
 	Reports []JobReport
 	Queue   Queue
 	Jobs    []slurmapi.Job
+
+	// Nodes and Partitions feed the configuration rules that compare a
+	// request against the hardware. ClusterUnread says they could not be
+	// read this pass - an absence to state, not a silence: fewer findings
+	// with no explanation reads as a clean cluster.
+	Nodes         []slurmapi.Node
+	Partitions    []slurmapi.Partition
+	ClusterUnread bool
 }
 
 func (b *Builder) Build(ctx context.Context) (Pass, error) {
@@ -277,7 +298,23 @@ func (b *Builder) Build(ctx context.Context) (Pass, error) {
 		r.Verdict = verdict.Judge(m, th)
 		out = append(out, r)
 	}
-	return Pass{Reports: out, Queue: q, Jobs: all}, nil
+	pass := Pass{Reports: out, Queue: q, Jobs: all}
+	// Cluster data is a second read, and a failed one costs the rules that
+	// need it - never the pass. A monitoring run that died because the
+	// partition list was briefly unavailable would be worse than a run that
+	// says which rules it could not apply.
+	if b.Cluster != nil {
+		nodes, nerr := b.Cluster.ListNodes(ctx)
+		parts, perr := b.Cluster.ListPartitions(ctx)
+		if nerr == nil && perr == nil {
+			pass.Nodes, pass.Partitions = nodes, parts
+		} else {
+			pass.ClusterUnread = true
+		}
+	} else {
+		pass.ClusterUnread = true
+	}
+	return pass, nil
 }
 
 // target is one pod and, when known, the GPU device indices on it that belong
