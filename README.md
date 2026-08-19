@@ -2,7 +2,7 @@
 
 Finds GPUs that Slurm has allocated but nobody is using. Joins slurmrestd, DCGM and Kubernetes pod identity into per-job efficiency metrics and Events.
 
-Two binaries. **`squire`** measures what GPUs are doing and needs the telemetry stack. **`squire-lint`** checks what jobs asked for and needs one slurmrestd URL — no DCGM, no Prometheus, no kubeconfig, so it runs on a login node where the other one cannot.
+Three binaries. **`squire`** measures what GPUs are doing and needs the telemetry stack. **`squire-lint`** checks what jobs asked for and needs one slurmrestd URL — no DCGM, no Prometheus, no kubeconfig, so it runs on a login node where the first one cannot. **`squire-me`** shows a user their own jobs by asking a running `squire`, and needs no credentials at all.
 
 ---
 
@@ -255,17 +255,17 @@ lmsilva@PANDAMONIUM:~/squire$
 
 Nothing prints below the table when there are no findings.
 
-#### Serve metrics and a web view
+#### Serve metrics, a web view and the JSON document
 
-`--serve` puts two surfaces on one port: `/metrics` for Prometheus, and `/` for a person with a browser.
+`--serve` puts three surfaces on one port: `/metrics` for Prometheus, `/` for a person with a browser, and `/snapshot.json` for a program — the last is what `squire-me` reads.
 
-Both are built from the same pass over the cluster and share one cache, so a page left open costs nothing beyond one rebuild per `--serve-cache` however many people are looking at it. Responses are cached for 30s by default — keep that under your Prometheus scrape interval, or you'll scrape the same numbers twice. `--serve-cache 0` turns it off and rebuilds on every request.
+All three are built from the same pass over the cluster and share one cache, so a page left open costs nothing beyond one rebuild per `--serve-cache` however many people are looking at it. Responses are cached for 30s by default — keep that under your Prometheus scrape interval, or you'll scrape the same numbers twice. `--serve-cache 0` turns it off and rebuilds on every request.
 
-**Anyone who can reach this port gets both, and both name users and jobs.** There is no login; see [Nothing on this port is authenticated](#nothing-on-this-port-is-authenticated). Bind it to localhost or a cluster-internal Service.
+**Anyone who can reach this port gets all three, and all three name users and jobs.** There is no login; see [Nothing on this port is authenticated](#nothing-on-this-port-is-authenticated). Bind it to localhost or a cluster-internal Service.
 
 ```
 lmsilva@PANDAMONIUM:~/squire$ go run ./cmd/squire --serve :9101 &
-serving /metrics and / on :9101
+serving /metrics, / and /snapshot.json on :9101
 lmsilva@PANDAMONIUM:~/squire$ curl -sS localhost:9101/metrics | grep -E "squire_job_gpus_(lit|held)"
 # HELP squire_job_gpus_lit GPU devices held by the job that have done work at some point in the run.
 # TYPE squire_job_gpus_lit gauge
@@ -395,6 +395,60 @@ Usage of squire-lint:
         slurmrestd base URL (default "http://localhost:6820")
 ```
 
+## Using squire-me
+
+`squire-me` answers "what are my jobs doing" by asking a running `squire --serve` for its `/snapshot.json`. It holds no credentials — no slurmrestd token, no kubeconfig, no Prometheus — because `squire` already holds all three and serves the joined result. What a user's shell cannot hold, a user's shell cannot leak.
+
+#### From a login node
+
+```
+lmsilva@login-0:~$ squire-me
+JOBID  NAME   USER  GPUS  ELAPSED  AVG%  PEAK%  GPU-MEM        WASTED-GPU-H  ACTIVITY   SIZING
+1042   train  luis  2     1h30m0s  94    100    4.0/15G (27%)  0.2           healthy:medium  right-sized
+```
+
+Your own jobs, decided by your uid. `--user someone` or `--uid 50000` looks at somebody else's — the server does not verify whose jobs you may see, exactly as on the dashboard, so this is a filter rather than a permission. `--wide` adds LIT, FIRST-WORK and WHY; `--dollar-rate` prices the waste, both exactly as in `squire`'s own table. Point it somewhere with `--url` once, or site-wide with `SQUIRE_URL` in a `profile.d` line.
+
+`--user` is resolved locally, and the binary is built without cgo, so a name that exists only in LDAP will not resolve on a node that does not put it in `/etc/passwd` — the error says so and `--uid` always works.
+
+#### Scripting it
+
+Exit codes are `squire-lint`'s: `0` clean, `1` findings about the jobs shown, `2` could not ask. Append `|| true` where you only want the printout.
+
+`--json` prints the server's document exactly as served, so `jq` sees what the server said:
+
+```
+lmsilva@login-0:~$ squire-me --json | jq '.jobs[] | {id, activity, wasted_gpu_hours}'
+```
+
+Unmeasured values are `null`, never `0` — a job whose telemetry has not arrived yet says `"activity": "analyzing"` with `null` numbers, which is the same fact the table states with a dash. The document carries a `schema` number, and `squire-me` refuses a schema it does not read before a byte reaches stdout, in both modes.
+
+The end of a batch script is a sensible place for it — by then the numbers describe the whole run:
+
+```bash
+squire-me --wide || true    # last line of the job script; the report lands in the job's own log
+```
+
+**Do not put it in a Slurm `Epilog`.** A non-zero exit from the Epilog — `squire-me` finding something, or `squire` being briefly unreachable — [DRAINs the node](https://slurm.schedmd.com/prolog_epilog.html), and an Epilog that outlives `EpilogTimeout` drains it too. A report is not worth a node. The job script line above gets the same numbers into the same log without the blast radius.
+
+#### Options
+```
+lmsilva@PANDAMONIUM:~/squire$ go run ./cmd/squire-me -h
+Usage of squire-me:
+  -dollar-rate float
+    	cost per wasted GPU-hour, shown next to the hours
+  -json
+    	print the server's JSON document instead of the table
+  -uid int
+    	show this numeric uid's jobs instead of your own
+  -url string
+    	base URL of a running squire --serve (or set SQUIRE_URL) (default "http://localhost:9101")
+  -user string
+    	show this user's jobs instead of your own (resolved locally)
+  -wide
+    	add the evidence columns: LIT, FIRST-WORK, WHY
+```
+
 ## Squire Flags
 
 | Flag | Default | What it does |
@@ -458,6 +512,7 @@ A build that was not stamped says `dev`, which is the truthful answer rather tha
 - Rule identifiers, like `partially-used-allocation`
 - Verdict state names, like `zombie` and `over-provisioned`
 - The Kubernetes Event reason, `GPUAllocationIdle`
+- The `/snapshot.json` document: its field names and its `schema` number, which increments on any break
 
 **Deliberately not covered: the wording of findings, table layout, and anything about the web page.** Those get better with use, and freezing them would help nobody. Script against rule identifiers and metric names, never against message text or HTML.
 

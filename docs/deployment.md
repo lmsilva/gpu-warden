@@ -18,7 +18,7 @@ Published on every release for `linux/amd64` and `linux/arm64`:
 ghcr.io/lmsilva/squire:v0.1.0
 ```
 
-It carries both binaries on a distroless base and runs as uid 65532. There is no shell in it — that is deliberate, and `kubectl exec ... -- sh` failing is the image working. Use `kubectl debug` when you need one.
+It carries all three binaries on a distroless base and runs as uid 65532. There is no shell in it — that is deliberate, and `kubectl exec ... -- sh` failing is the image working. Use `kubectl debug` when you need one.
 
 Plain binaries and checksums are attached to each release too. Those are for `squire-lint` on a login node, which typically has no container runtime at all — and would not want one for a read-only check.
 
@@ -137,6 +137,20 @@ kubectl -n $NS get pod -l app.kubernetes.io/name=squire \
   -o jsonpath='{.items[0].status.containerStatuses[0].imageID}'
 ```
 
+## What identity Slurm needs
+
+Squire never authenticates a user and never maps a name to a uid itself — it prints and filters exactly what slurmrestd sends. Four requirements follow, all on the Slurm side, all visible as symptoms in Squire when missing.
+
+**slurmctld must be able to resolve usernames.** The controller records the owner when the job is submitted. If its container cannot see your user database — no sssd, no NSS source, a bare `/etc/passwd` — the name is never recorded, and nothing downstream can invent it.
+
+**slurmrestd must be able to resolve them too.** It serializes the job record on the way out, and a restapi container without the same NSS view degrades the user fields even where the controller had them. In Slinky both daemons run in pods, so "the node can resolve users" is not enough — each container must.
+
+**If `PrivateData=jobs` is set, Squire's token needs an operator account.** With that setting, slurmrestd answers each token with only that account's own jobs. Squire's account must then be `SlurmUser`, `root`, or carry `AdminLevel=Operator` in sacctmgr — otherwise every other user's jobs silently vanish from the dashboard, the metrics, and every `squire-me` except the operator's own. The symptom is an emptier cluster than `squeue` shows, with no error anywhere.
+
+**On Slinky, `slurm.conf` changes go through Helm values.** The operator owns the file and reconciles hand-edits away, so a `PrivateData` or NSS-related change made with an editor holds only until the next sync. Set it where the operator reads it.
+
+**The `uid:50000` you may see** in a USER column, a metric label, or an Event is Squire's fallback when Slurm sent a uid but no name — the first two requirements failing, not the third. Everything still works: `squire-me` filters on the numeric uid, so ownership is exact even while the display name is missing. Fix the NSS view in the two containers and the names come back on the next pass.
+
 ## Recording findings as Events
 
 **Turn this on.** It is the difference between findings that wait to be scraped and findings that arrive where people already look.
@@ -231,7 +245,7 @@ The Deployment serves `/metrics` on port 9101 and the Service exposes it. Respon
 
 ## Looking at it
 
-The same port serves a web view at `/`, built from the same cached pass. Forward it and open it:
+The same port serves a web view at `/` and the same pass as a document at `/snapshot.json` — one cache behind all three surfaces, so they cannot disagree. Forward it and open it:
 
 ```bash
 kubectl -n $NS port-forward svc/squire 9101:9101
@@ -241,7 +255,7 @@ kubectl -n $NS port-forward svc/squire 9101:9101
 http://localhost:9101/
 ```
 
-**Neither surface is authenticated**, and that is deliberate: `/metrics` has always served usernames and job names, so a login on the page beside it would protect nothing a `curl` cannot already reach. The reasoning is in the [README](../README.md#nothing-on-this-port-is-authenticated).
+**None of these surfaces is authenticated**, and that is deliberate: `/metrics` has always served usernames and job names, so a login on the page beside it would protect nothing a `curl` cannot already reach. The reasoning is in the [README](../README.md#nothing-on-this-port-is-authenticated).
 
 **What that means for you is one rule.** A port-forward already requires Kubernetes RBAC on this namespace, so as installed above, the boundary is your cluster's. **The first time you make Squire reachable without a port-forward, put authentication in front of it** — an Ingress with auth, an oauth2 proxy, or a NetworkPolicy holding it where it is. Do not wait to be asked; an internal dashboard listing who is wasting what is the kind of URL that gets shared.
 
