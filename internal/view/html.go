@@ -29,14 +29,16 @@ type HTMLOptions struct {
 // calling methods from the template keeps the logic where it can be tested
 // and the template to placement.
 type page struct {
-	Version  string
-	At       string
-	Refresh  int
-	Rows     []row
-	Findings []pageFinding
-	Waiting  string
-	PodWide  string
-	Faulted  string
+	Version       string
+	At            string
+	Refresh       int
+	Rows          []row
+	Allocation    []pageFinding
+	Configuration []pageFinding
+	Waiting       string
+	PodWide       string
+	Faulted       string
+	ClusterUnread string
 }
 
 type pageFinding struct {
@@ -136,18 +138,37 @@ footer { color: var(--muted); margin-top: 2.5rem; font-size: .85rem; }
 </table>
 {{else}}
 <p>No GPU jobs are running.</p>
-<p class="meta">CPU-only jobs are not shown here — Squire reports what GPUs are doing, and a job holding no GPU has nothing for it to measure. <code>squire-lint</code> checks those.</p>
+<p class="meta">This table is GPU jobs only — every column in it is a card measurement, so a job holding no GPU would be a row of dashes. Those jobs are still checked: they appear under Configuration findings below when something is wrong with what they asked for.</p>
 {{end}}
 
 {{if .PodWide}}<p class="note">{{.PodWide}}</p>{{end}}
 {{if .Faulted}}<p class="note">{{.Faulted}}</p>{{end}}
+{{if .ClusterUnread}}<p class="note">{{.ClusterUnread}}</p>{{end}}
 
-{{if .Findings}}
-<h2>Findings</h2>
+{{if .Allocation}}
+<h2>Allocation findings</h2>
+<p class="meta">What the cards did, for the jobs in the table above.</p>
 <table>
 <thead><tr><th>Job</th><th>Name</th><th>Severity</th><th>Rule</th><th>Finding</th></tr></thead>
 <tbody>
-{{range .Findings}}
+{{range .Allocation}}
+<tr>
+<td class="num">{{.JobID}}</td><td>{{.Name}}</td>
+<td class="sev-{{.Severity}}">{{.Severity}}</td><td>{{.Rule}}</td>
+<td style="white-space: normal">{{.Message}}</td>
+</tr>
+{{end}}
+</tbody>
+</table>
+{{end}}
+
+{{if .Configuration}}
+<h2>Configuration findings</h2>
+<p class="meta">What jobs asked for. These cover every job Slurm knows about, including jobs that hold no GPU and jobs that have not started — so they can name a job the table above does not show.</p>
+<table>
+<thead><tr><th>Job</th><th>Name</th><th>Severity</th><th>Rule</th><th>Finding</th></tr></thead>
+<tbody>
+{{range .Configuration}}
 <tr>
 <td class="num">{{.JobID}}</td><td>{{.Name}}</td>
 <td class="sev-{{.Severity}}">{{.Severity}}</td><td>{{.Rule}}</td>
@@ -178,20 +199,29 @@ footer { color: var(--muted); margin-top: 2.5rem; font-size: .85rem; }
 // page behind it, which reads as a Squire that has lost some jobs rather than
 // as an error.
 func HTML(w io.Writer, s wire.Snapshot, o HTMLOptions) error {
-	fs := make([]pageFinding, 0, len(s.Findings))
+	var alloc, conf []pageFinding
 	for _, f := range s.Findings {
-		fs = append(fs, pageFinding{
+		pf := pageFinding{
 			JobID: f.JobID, Name: f.JobName,
 			Severity: f.Severity, Rule: f.Rule, Message: f.Message,
-		})
+		}
+		// Two tables, because the two kinds are not the same claim. A kind
+		// this page predates goes with the allocation findings rather than
+		// vanishing.
+		if f.Kind == wire.KindConfiguration {
+			conf = append(conf, pf)
+		} else {
+			alloc = append(alloc, pf)
+		}
 	}
 
 	p := page{
-		Version:  o.Version,
-		Refresh:  int(o.Refresh.Seconds()),
-		Rows:     rows(s, o.DollarRate),
-		Findings: fs,
-		Waiting:  waiting(s),
+		Version:       o.Version,
+		Refresh:       int(o.Refresh.Seconds()),
+		Rows:          rows(s, o.DollarRate),
+		Allocation:    alloc,
+		Configuration: conf,
+		Waiting:       waiting(s),
 	}
 	if !s.At.IsZero() {
 		p.At = s.At.Format("15:04:05 MST")
@@ -201,6 +231,9 @@ func HTML(w io.Writer, s wire.Snapshot, o HTMLOptions) error {
 	}
 	if s.EngineFaulted {
 		p.Faulted = "Note: " + faultedNote
+	}
+	if s.ClusterUnread {
+		p.ClusterUnread = "Note: " + clusterUnreadNote
 	}
 
 	var buf bytes.Buffer

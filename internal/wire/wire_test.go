@@ -329,3 +329,39 @@ func TestEncodeWritesOnce(t *testing.T) {
 		t.Errorf("the document lost something on the way: %+v", s)
 	}
 }
+
+// TestBothEngineFindingsCross: the document carries both sets, marked, in a
+// fixed order - allocation first, so every reader gets the same one without
+// sorting anything itself.
+func TestBothEngineFindingsCross(t *testing.T) {
+	s := From(cycle.Snapshot{
+		Jobs: []slurmapi.Job{{JobID: 1, Name: "train"}, {JobID: 2, Name: "pending"}},
+		Findings: []lint.Finding{
+			{JobID: 1, Rule: "partially-used-allocation", Severity: lint.Warn},
+		},
+		ConfigFindings: []lint.Finding{
+			{JobID: 2, Rule: "no-time-limit", Severity: lint.Warn},
+		},
+	})
+	if len(s.Findings) != 2 {
+		t.Fatalf("both sets must cross, got %d", len(s.Findings))
+	}
+	if s.Findings[0].Kind != KindAllocation || s.Findings[1].Kind != KindConfiguration {
+		t.Errorf("allocation first, then configuration: %+v", s.Findings)
+	}
+	if s.Findings[1].JobName != "pending" {
+		t.Errorf("a configuration finding names a job outside the table, got %q",
+			s.Findings[1].JobName)
+	}
+}
+
+// TestUnreadClusterCrosses: the fact that some rules did not run has to reach
+// every reader of the document, not only the two that render a page.
+func TestUnreadClusterCrosses(t *testing.T) {
+	if !From(cycle.Snapshot{ClusterUnread: true}).ClusterUnread {
+		t.Error("an unread cluster must cross the wire")
+	}
+	if From(cycle.Snapshot{}).ClusterUnread {
+		t.Error("a good pass must not claim otherwise")
+	}
+}

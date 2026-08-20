@@ -170,7 +170,7 @@ func TestFindingsBlock(t *testing.T) {
 
 	// The finding is labelled with the job's name, which it does not carry
 	// itself.
-	for _, want := range []string{"SEVERITY", "warn", "partially-used-allocation", "train"} {
+	for _, want := range []string{"ALLOCATION", "SEVERITY", "warn", "partially-used-allocation", "train"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("findings block is missing %q:\n%s", want, out)
 		}
@@ -184,5 +184,47 @@ func TestNoFindingsPrintsNothingExtra(t *testing.T) {
 	Table(&sb, wire.Snapshot{Jobs: []wire.Job{busy()}}, TableOptions{})
 	if strings.Contains(sb.String(), "SEVERITY") {
 		t.Errorf("no findings must mean no findings block:\n%s", sb.String())
+	}
+}
+
+// TestTableSeparatesTheTwoKinds: two blocks under their own headings. A
+// configuration finding can be about a job that has no row above it, so a
+// single merged list would leave the reader looking for one.
+func TestTableSeparatesTheTwoKinds(t *testing.T) {
+	s := wire.Snapshot{
+		Jobs: []wire.Job{busy()},
+		Findings: []wire.Finding{
+			{JobID: 101, JobName: "train", Kind: wire.KindAllocation,
+				Rule: "partially-used-allocation", Severity: "warn", Message: "one card idle"},
+			{JobID: 900, JobName: "pending-cpu-job", Kind: wire.KindConfiguration,
+				Rule: "no-time-limit", Severity: "warn", Message: "no time limit set"},
+		},
+	}
+	var sb strings.Builder
+	Table(&sb, s, TableOptions{})
+	out := sb.String()
+	for _, want := range []string{"ALLOCATION", "CONFIGURATION", "pending-cpu-job", "no-time-limit"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the table is missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Index(out, "ALLOCATION") > strings.Index(out, "CONFIGURATION") {
+		t.Error("allocation findings come first")
+	}
+	// A cluster with only configuration findings prints that block alone.
+	only := wire.Snapshot{Findings: []wire.Finding{s.Findings[1]}}
+	var sb2 strings.Builder
+	Table(&sb2, only, TableOptions{})
+	if strings.Contains(sb2.String(), "ALLOCATION") {
+		t.Errorf("an empty block must not print its heading:\n%s", sb2.String())
+	}
+}
+
+// TestTableSaysWhenTheClusterWasUnread pins the degradation note.
+func TestTableSaysWhenTheClusterWasUnread(t *testing.T) {
+	var sb strings.Builder
+	Table(&sb, wire.Snapshot{ClusterUnread: true}, TableOptions{})
+	if !strings.Contains(sb.String(), "could not be read") {
+		t.Errorf("an unread cluster must be stated:\n%s", sb.String())
 	}
 }

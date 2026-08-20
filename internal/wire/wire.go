@@ -46,6 +46,11 @@ type Snapshot struct {
 	// reports each carry an identical copy - so on the wire it is said once,
 	// about the pass.
 	EngineFaulted bool `json:"engine_faulted"`
+
+	// ClusterUnread says the node and partition lists could not be read, so
+	// the configuration rules that compare a request against the hardware
+	// did not run. Without it a shorter findings list reads as good news.
+	ClusterUnread bool `json:"cluster_unread"`
 }
 
 // Job is one running GPU job. States are the words the metrics already use;
@@ -148,10 +153,18 @@ func From(s cycle.Snapshot) Snapshot {
 	for _, j := range s.Jobs {
 		names[j.JobID] = j.Name
 	}
-	findings := make([]Finding, 0, len(s.Findings))
+	findings := make([]Finding, 0, len(s.Findings)+len(s.ConfigFindings))
 	for _, f := range s.Findings {
 		findings = append(findings, Finding{
 			JobID: f.JobID, JobName: names[f.JobID], Kind: KindAllocation,
+			Rule: f.Rule, Severity: f.Severity.String(), Message: f.Message,
+		})
+	}
+	// Allocation first, then configuration. The order is the document's, so
+	// every reader gets the same one without sorting anything itself.
+	for _, f := range s.ConfigFindings {
+		findings = append(findings, Finding{
+			JobID: f.JobID, JobName: names[f.JobID], Kind: KindConfiguration,
 			Rule: f.Rule, Severity: f.Severity.String(), Message: f.Message,
 		})
 	}
@@ -165,6 +178,7 @@ func From(s cycle.Snapshot) Snapshot {
 			PendingGPUs:    s.Queue.PendingGPUs,
 		},
 		EngineFaulted: faulted,
+		ClusterUnread: s.ClusterUnread,
 	}
 }
 

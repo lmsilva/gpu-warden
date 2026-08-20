@@ -80,10 +80,13 @@ func TestHTMLEmptyCluster(t *testing.T) {
 	if strings.Contains(out, "<tbody>") {
 		t.Errorf("no jobs must mean no table:\n%s", out)
 	}
-	// And it must say which jobs it means. A cluster busy with CPU work
-	// would otherwise read this as Squire having lost track of everything.
-	if !strings.Contains(out, "CPU-only jobs are not shown") {
-		t.Errorf("the empty state must name what it excludes:\n%s", out)
+	// And it must say which jobs it means, without claiming they go
+	// unchecked - the configuration findings below cover them.
+	if !strings.Contains(out, "GPU jobs only") {
+		t.Errorf("the empty state must name what the table holds:\n%s", out)
+	}
+	if strings.Contains(out, "CPU-only jobs are not shown") {
+		t.Errorf("the old wording says those jobs are unchecked, which is no longer true:\n%s", out)
 	}
 }
 
@@ -123,7 +126,7 @@ func TestHTMLFindingsAndNotes(t *testing.T) {
 	out := render(t, s, HTMLOptions{})
 	// The pod-wide note is matched without its apostrophe: html/template
 	// escapes the page's own text too, so "job's" arrives as "job&#39;s".
-	for _, want := range []string{"Findings", "gpu-requested-never-touched", "warn",
+	for _, want := range []string{"Allocation findings", "gpu-requested-never-touched", "warn",
 		"wrap", "telemetry covers every GPU"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("the page is missing %q:\n%s", want, out)
@@ -186,5 +189,47 @@ func TestHTMLColoursAreNamedOnce(t *testing.T) {
 		if strings.Contains(line, "#") && !strings.Contains(line, "--") {
 			t.Errorf("colour literal outside the variable block: %s", strings.TrimSpace(line))
 		}
+	}
+}
+
+// TestHTMLSeparatesTheTwoKinds: the two engines make different claims, so the
+// page gives them their own tables. A configuration finding can name a job
+// the verdict table does not show, which is why merging them would leave a
+// reader hunting for a row that was never there.
+func TestHTMLSeparatesTheTwoKinds(t *testing.T) {
+	s := wire.Snapshot{
+		Jobs: []wire.Job{unmeasured()},
+		Findings: []wire.Finding{
+			{JobID: 102, JobName: "wrap", Kind: wire.KindAllocation,
+				Rule: "gpu-requested-never-touched", Severity: "warn",
+				Message: "its 1 GPU has done no work"},
+			{JobID: 900, JobName: "pending-cpu-job", Kind: wire.KindConfiguration,
+				Rule: "no-time-limit", Severity: "warn",
+				Message: "no time limit set"},
+		},
+	}
+	out := render(t, s, HTMLOptions{})
+	for _, want := range []string{"Allocation findings", "Configuration findings",
+		"pending-cpu-job", "no-time-limit"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the page is missing %q:\n%s", want, out)
+		}
+	}
+	// The configuration heading must come after the allocation one: the
+	// attribution is the point, and a linter finding above it dilutes that.
+	if strings.Index(out, "Allocation findings") > strings.Index(out, "Configuration findings") {
+		t.Error("allocation findings come first")
+	}
+}
+
+// TestHTMLSaysWhenTheClusterWasUnread: fewer findings with no explanation
+// reads as a clean cluster.
+func TestHTMLSaysWhenTheClusterWasUnread(t *testing.T) {
+	out := render(t, wire.Snapshot{ClusterUnread: true}, HTMLOptions{})
+	if !strings.Contains(out, "could not be read") {
+		t.Errorf("an unread cluster must be stated on the page:\n%s", out)
+	}
+	if quiet := render(t, wire.Snapshot{}, HTMLOptions{}); strings.Contains(quiet, "could not be read") {
+		t.Errorf("a good pass must not carry the note:\n%s", quiet)
 	}
 }

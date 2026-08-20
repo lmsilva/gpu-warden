@@ -154,6 +154,8 @@ func toRow(j wire.Job, dollarRate float64) row {
 }
 
 const (
+	clusterUnreadNote = "the node and partition lists could not be read this cycle, so the checks that\n" +
+		"compare a request against the hardware did not run. What is below is what was checked."
 	podWideNote = "* GPU indices unavailable (no gres_detail): telemetry covers every GPU on the job's nodes."
 	faultedNote = "the GR_ENGINE_ACTIVE signal read flat cluster-wide while GPUs were busy,\n" +
 		"so it was ignored this cycle. Verdicts stand; confidence is lower than it could be."
@@ -188,6 +190,9 @@ func Table(out io.Writer, s wire.Snapshot, o TableOptions) {
 	if s.EngineFaulted {
 		fmt.Fprintln(out, "\nnote: "+faultedNote)
 	}
+	if s.ClusterUnread {
+		fmt.Fprintln(out, "\nnote: "+clusterUnreadNote)
+	}
 	findings(out, s)
 }
 
@@ -199,13 +204,29 @@ func Table(out io.Writer, s wire.Snapshot, o TableOptions) {
 // table its shape. The columns match squire-lint's, so a reader who has seen
 // one recognises the other.
 func findings(out io.Writer, s wire.Snapshot) {
-	if len(s.Findings) == 0 {
+	// Two blocks, not one sorted list. An allocation finding is about a job
+	// in the table above; a configuration finding can be about a job that is
+	// not there at all - a pending one, or one holding no card. Merging them
+	// is tidier and costs the reader their bearings.
+	block(out, "ALLOCATION", s.Findings, wire.KindAllocation)
+	block(out, "CONFIGURATION", s.Findings, wire.KindConfiguration)
+}
+
+// block writes the findings of one kind, under its own heading.
+func block(out io.Writer, title string, all []wire.Finding, kind string) {
+	var rows []wire.Finding
+	for _, f := range all {
+		if f.Kind == kind {
+			rows = append(rows, f)
+		}
+	}
+	if len(rows) == 0 {
 		return
 	}
-	fmt.Fprintln(out)
+	fmt.Fprintf(out, "\n%s\n", title)
 	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(w, "JOBID\tNAME\tSEVERITY\tRULE\tFINDING")
-	for _, f := range s.Findings {
+	for _, f := range rows {
 		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\n",
 			f.JobID, f.JobName, f.Severity, f.Rule, f.Message)
 	}
