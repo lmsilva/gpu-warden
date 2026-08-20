@@ -38,6 +38,7 @@ func Job(j slurmapi.Job) lint.Job {
 		Partition:     j.Partition,
 		State:         j.BaseState(),
 		GPUsRequested: slurmapi.GPUCount(j),
+		GPUsPerNode:   gresGPUs(strings.TrimPrefix(j.TresPerNode, "gres/")),
 		Exclusive:     j.Exclusive(),
 		ExclusiveMode: j.ExclusiveMode(),
 		CPUs:          tresCount(j.TresAlloc, "cpu"),
@@ -67,7 +68,7 @@ func Cluster(nodes []slurmapi.Node, parts []slurmapi.Partition) *lint.Cluster {
 	}
 	for _, n := range nodes {
 		c.Nodes[n.Name] = lint.Node{
-			Name: n.Name, GPUs: gresGPUs(n.Gres),
+			Name: n.Name, GPUs: gresGPUs(n.Gres), Partitions: n.Partitions,
 			MemoryMB: n.RealMemory.Number, CPUs: n.SchedulableCPUs(),
 		}
 	}

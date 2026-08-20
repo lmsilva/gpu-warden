@@ -10,6 +10,7 @@ package lint
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"time"
 )
@@ -78,6 +79,12 @@ type Job struct {
 	GPUsRequested int  // 0 for a CPU-only job
 	Exclusive     bool // whole-node allocation requested
 
+	// GPUsPerNode is what the job asked for on each node it lands on, read
+	// from the per-node request alone. GPUsRequested can come from what was
+	// allocated instead, which is a job-wide number - only this one can be
+	// compared against a single node's card count. 0 means none was named.
+	GPUsPerNode int
+
 	// ExclusiveMode is Slurm's word for how the job shares its nodes:
 	// "none" for --exclusive, "user" and "mcs" for the scoped variants.
 	// Empty means the node is shared normally.
@@ -116,6 +123,10 @@ type Job struct {
 type Node struct {
 	Name string
 	GPUs int
+	// Partitions the node belongs to. A request can only be satisfied by a
+	// node in the partition it was submitted to, so a rule comparing the two
+	// needs to know which nodes count.
+	Partitions []string
 	// MemoryMB is the node's total memory. 0 means unknown, which silences
 	// the rule that compares against it.
 	MemoryMB int64
@@ -157,6 +168,7 @@ func Check(j Job, c *Cluster) []Finding {
 	dependencyDoomed(j, add)
 	noTimeLimit(j, add)
 	if c != nil {
+		unsatisfiableRequest(j, *c, add)
 		timeLimitAtPartitionMax(j, *c, add)
 		cpuOnlyOnGPUNode(j, *c, add)
 		exclusiveOverAllocation(j, *c, add)
@@ -188,6 +200,42 @@ func dependencyDoomed(j Job, add func(Finding)) {
 	add(Finding{JobID: j.ID, Rule: "dependency-doomed", Severity: Warn,
 		Message: "pending on a dependency Slurm says can never be satisfied - it will queue forever. " +
 			"kill_invalid_depend in slurm.conf removes these automatically"})
+}
+
+// unsatisfiableRequest: the job asks each node for more cards than any node in
+// its partition has, so no amount of waiting will start it. Slurm accepts the
+// submission and queues it, and the pending reason names resources, which is
+// the same word a job waiting behind a busy queue gets - so the two are
+// indistinguishable to the person watching.
+//
+// Only the per-node card count is checked. It is the one request that maps
+// exactly onto one node: Slurm reports processors and memory as job-wide
+// totals, and a job spread over four nodes may legitimately ask for more of
+// both than any single node has. Reporting on a number this rule cannot
+// interpret would produce confident nonsense on multi-node jobs.
+//
+// A partition with no nodes in the list is silence, not a finding: it means
+// the node list was filtered or unreadable, not that the partition is empty.
+func unsatisfiableRequest(j Job, c Cluster, add func(Finding)) {
+	if j.GPUsPerNode <= 0 {
+		return
+	}
+	best, seen := 0, 0
+	for _, n := range c.Nodes {
+		if !slices.Contains(n.Partitions, j.Partition) {
+			continue
+		}
+		seen++
+		if n.GPUs > best {
+			best = n.GPUs
+		}
+	}
+	if seen == 0 || j.GPUsPerNode <= best {
+		return
+	}
+	add(Finding{JobID: j.ID, Rule: "unsatisfiable-request", Severity: Warn,
+		Message: fmt.Sprintf("asks for %d GPUs per node, and the largest node in %s has %d - this job cannot start, whatever the queue does",
+			j.GPUsPerNode, j.Partition, best)})
 }
 
 // noTimeLimit: a job with no wall-clock limit cannot be backfilled, because

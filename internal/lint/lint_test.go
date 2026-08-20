@@ -290,3 +290,66 @@ func TestFindingsAreStablyOrdered(t *testing.T) {
 		t.Fatalf("this fixture should produce several findings, got %v", first)
 	}
 }
+
+// TestUnsatisfiableRequest: a job asking each node for more cards than any
+// node in its partition has will never start, and Slurm's pending reason for
+// it is the same word a job waiting behind a busy queue gets.
+func TestUnsatisfiableRequest(t *testing.T) {
+	c := Cluster{Nodes: map[string]Node{
+		"small": {Name: "small", GPUs: 1, Partitions: []string{"all"}},
+		"big":   {Name: "big", GPUs: 4, Partitions: []string{"all"}},
+		"huge":  {Name: "huge", GPUs: 8, Partitions: []string{"other"}},
+	}}
+
+	// Eight per node, and the best node in this partition has four - the
+	// eight-card node is in a partition this job did not ask for.
+	got := Check(Job{ID: 1, State: "PENDING", Partition: "all", GPUsPerNode: 8,
+		HasTimeLimit: true, TimeLimit: time.Hour}, &c)
+	if !fired(got) {
+		t.Fatalf("want the request called impossible, got %+v", got)
+	}
+	if !strings.Contains(message(got, "unsatisfiable-request"), "has 4") {
+		t.Errorf("the message must name what the partition can offer: %+v", got)
+	}
+
+	// Exactly what the biggest node has is satisfiable - it only has to wait.
+	if fired(Check(Job{ID: 2, State: "PENDING", Partition: "all", GPUsPerNode: 4}, &c)) {
+		t.Error("a request the largest node can meet must not fire")
+	}
+
+	// A partition with no nodes in the list means the list was filtered or
+	// unreadable, not that nothing can run there.
+	if fired(Check(Job{ID: 3, State: "PENDING", Partition: "ghost", GPUsPerNode: 99}, &c)) {
+		t.Error("an unknown partition must be silence, not a finding")
+	}
+
+	// A job naming no per-node card count says nothing about nodes.
+	if fired(Check(Job{ID: 4, State: "PENDING", Partition: "all"}, &c)) {
+		t.Error("a job with no per-node request must not fire")
+	}
+
+	// Without cluster data the rule cannot run at all.
+	if fired(Check(Job{ID: 5, State: "PENDING", Partition: "all", GPUsPerNode: 99}, nil)) {
+		t.Error("no cluster means no comparison")
+	}
+}
+
+// message returns one rule's message, for asserting on its wording.
+func message(fs []Finding, rule string) string {
+	for _, f := range fs {
+		if f.Rule == rule {
+			return f.Message
+		}
+	}
+	return ""
+}
+
+// fired reports whether the unsatisfiable-request rule is among the findings.
+func fired(fs []Finding) bool {
+	for _, f := range fs {
+		if f.Rule == "unsatisfiable-request" {
+			return true
+		}
+	}
+	return false
+}
