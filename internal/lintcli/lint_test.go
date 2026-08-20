@@ -98,12 +98,45 @@ func TestExitCodes(t *testing.T) {
 	}
 	for _, tc := range cases {
 		var sb strings.Builder
-		got := runLint(context.Background(), fakeSlurm(t, tc.jobs, tc.nodes, tc.parts), &sb)
+		got := runLint(context.Background(), fakeSlurm(t, tc.jobs, tc.nodes, tc.parts), filter{}, &sb)
 		if got != tc.want {
 			t.Errorf("%s: exit %d, want %d (output: %s)", tc.name, got, tc.want, sb.String())
 		}
 		if !strings.Contains(sb.String(), tc.wantOutput) {
 			t.Errorf("%s: output %q does not contain %q", tc.name, sb.String(), tc.wantOutput)
 		}
+	}
+}
+
+// TestFilterNarrowsWhatIsPrinted: the same two terms the other tools take,
+// and the same meaning - fewer findings, never fewer jobs. The count line
+// still describes what was checked, because the filter is about the output
+// and not about the work.
+func TestFilterNarrowsWhatIsPrinted(t *testing.T) {
+	const twoBadJobs = `{"jobs":[
+		{"job_id":1,"name":"a","partition":"batch","job_state":["RUNNING"],"nodes":"a"},
+		{"job_id":2,"name":"b","partition":"batch","job_state":["RUNNING"],"nodes":"a"}]}`
+	var sb strings.Builder
+	got := runLint(context.Background(), fakeSlurm(t, twoBadJobs, someNodes, someParts),
+		filter{job: 2}, &sb)
+	out := sb.String()
+	if got != exitFindings {
+		t.Fatalf("job 2 has a finding, want exit %d, got %d:\n%s", exitFindings, got, out)
+	}
+	if strings.Contains(out, "no-time-limit") && strings.Contains(out, "\n1 ") {
+		t.Errorf("job 1 must be filtered out:\n%s", out)
+	}
+	if !strings.Contains(out, "\n2 ") {
+		t.Errorf("job 2's finding must be shown:\n%s", out)
+	}
+	if !strings.Contains(out, "2 jobs") {
+		t.Errorf("the count still describes what was checked:\n%s", out)
+	}
+
+	// A rule nobody tripped reads as clean, not as an error.
+	var sb2 strings.Builder
+	if got := runLint(context.Background(), fakeSlurm(t, twoBadJobs, someNodes, someParts),
+		filter{rule: "no-such-rule"}, &sb2); got != exitClean {
+		t.Errorf("an unmatched rule is clean, got %d:\n%s", got, sb2.String())
 	}
 }

@@ -365,3 +365,59 @@ func TestUnreadClusterCrosses(t *testing.T) {
 		t.Error("a good pass must not claim otherwise")
 	}
 }
+
+// TestFilterFindingsTouchesOnlyFindings: the filter answers "show me this
+// rule", not "hide the cluster". The jobs, the queue and the cluster facts
+// stay whole, because a table missing rows would answer a question nobody
+// asked.
+func TestFilterFindingsTouchesOnlyFindings(t *testing.T) {
+	s := From(cycle.Snapshot{
+		Reports: []report.JobReport{measured()},
+		Jobs:    []slurmapi.Job{{JobID: 101, Name: "train"}, {JobID: 200, Name: "other"}},
+		Queue:   report.Queue{PendingGPUJobs: 2, PendingGPUs: 9},
+		Findings: []lint.Finding{
+			{JobID: 101, Rule: "partially-used-allocation", Severity: lint.Warn},
+		},
+		ConfigFindings: []lint.Finding{
+			{JobID: 101, Rule: "no-time-limit", Severity: lint.Warn},
+			{JobID: 200, Rule: "no-time-limit", Severity: lint.Warn},
+		},
+	})
+
+	byRule := s.FilterFindings(FindingFilter{Rule: "no-time-limit"})
+	if len(byRule.Findings) != 2 {
+		t.Errorf("want the two no-time-limit findings, got %+v", byRule.Findings)
+	}
+	if len(byRule.Jobs) != len(s.Jobs) || byRule.Queue != s.Queue {
+		t.Error("filtering findings must not touch the jobs or the queue")
+	}
+
+	byJob := s.FilterFindings(FindingFilter{JobID: 200})
+	if len(byJob.Findings) != 1 || byJob.Findings[0].JobID != 200 {
+		t.Errorf("want job 200's finding alone, got %+v", byJob.Findings)
+	}
+
+	// Both terms together are an AND.
+	both := s.FilterFindings(FindingFilter{Rule: "partially-used-allocation", JobID: 200})
+	if len(both.Findings) != 0 {
+		t.Errorf("two terms must both match, got %+v", both.Findings)
+	}
+
+	// A rule nobody tripped is an empty list, not an error.
+	none := s.FilterFindings(FindingFilter{Rule: "no-such-rule"})
+	if len(none.Findings) != 0 {
+		t.Errorf("an unknown rule yields nothing, got %+v", none.Findings)
+	}
+	b, err := json.Marshal(none)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"findings":[]`) {
+		t.Errorf("an emptied list must still be a list:\n%s", b)
+	}
+
+	// A zero filter is the whole pass, unchanged.
+	if len(s.FilterFindings(FindingFilter{}).Findings) != 3 {
+		t.Error("an empty filter keeps everything")
+	}
+}

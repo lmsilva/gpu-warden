@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/user"
 	"strconv"
@@ -58,6 +59,8 @@ type config struct {
 	uid        int
 	uidSet     bool
 	user       string
+	rule       string
+	job        int
 	jsonOut    bool
 	wide       bool
 	dollarRate float64
@@ -83,6 +86,8 @@ func parseConfig(name string, args []string) config {
 		"base URL of a running squire --serve (or set SQUIRE_URL)")
 	fs.IntVar(&c.uid, "uid", 0, "show this numeric uid's jobs instead of your own")
 	fs.StringVar(&c.user, "user", "", "show this user's jobs instead of your own (resolved locally)")
+	fs.StringVar(&c.rule, "rule", "", "show only findings from this rule, e.g. no-time-limit")
+	fs.IntVar(&c.job, "job", 0, "show only findings about this job id")
 	fs.BoolVar(&c.jsonOut, "json", false, "print the server's JSON document instead of the table")
 	fs.BoolVar(&c.wide, "wide", false, "add the evidence columns: LIT, FIRST-WORK, WHY")
 	fs.Float64Var(&c.dollarRate, "dollar-rate", 0, "cost per wasted GPU-hour, shown next to the hours")
@@ -104,6 +109,9 @@ func parseConfig(name string, args []string) config {
 // invoking user. Both flags at once is a contradiction to report rather than
 // an order to pick.
 func resolveUID(c config) (int, error) {
+	if c.job < 0 {
+		return 0, fmt.Errorf("--job must be a job id, got %d", c.job)
+	}
 	if c.uidSet && c.user != "" {
 		return 0, fmt.Errorf("--uid and --user both name an owner; pass one")
 	}
@@ -133,8 +141,18 @@ func resolveUID(c config) (int, error) {
 // fetch asks the server for the document, already narrowed to one owner.
 // The reply is capped: a pass is kilobytes, and a URL that streams more
 // than this is not a squire.
-func fetch(ctx context.Context, base string, uid int) ([]byte, error) {
-	u := strings.TrimSuffix(base, "/") + "/snapshot.json?uid=" + strconv.Itoa(uid)
+func fetch(ctx context.Context, base string, uid int, c config) ([]byte, error) {
+	// The filters go to the server, like the owner does. The client asks for
+	// less rather than receiving everything and hiding some of it, so a later
+	// authenticated server can enforce the same narrowing it already applies.
+	q := url.Values{"uid": {strconv.Itoa(uid)}}
+	if c.rule != "" {
+		q.Set("rule", c.rule)
+	}
+	if c.job > 0 {
+		q.Set("job", strconv.Itoa(c.job))
+	}
+	u := strings.TrimSuffix(base, "/") + "/snapshot.json?" + q.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, fmt.Errorf("building the request for %s: %w", base, err)
@@ -163,7 +181,7 @@ func run(c config, uid int, stdout, stderr io.Writer) int {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	body, err := fetch(ctx, c.url, uid)
+	body, err := fetch(ctx, c.url, uid, c)
 	if err != nil {
 		fmt.Fprintln(stderr, "error:", err)
 		return exitError

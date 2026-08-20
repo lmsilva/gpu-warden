@@ -202,6 +202,22 @@ func parseUID(q url.Values) (uid int, filter bool, err error) {
 	return n, true, nil
 }
 
+// parseFindingFilter reads the optional rule and job query parameters. Absent
+// means every finding. A rule name is not validated: the server would have to
+// pin every rule name into the URL contract to do it, and a script asking for
+// a rule the cluster has not tripped wants an empty list rather than an error.
+func parseFindingFilter(q url.Values) (wire.FindingFilter, error) {
+	f := wire.FindingFilter{Rule: q.Get("rule")}
+	if raw := q.Get("job"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 {
+			return wire.FindingFilter{}, fmt.Errorf("job must be a positive integer, got %q", raw)
+		}
+		f.JobID = n
+	}
+	return f, nil
+}
+
 func main() {
 	// Answered before anything is parsed or built: a binary that cannot start
 	// should still be able to say what it is.
@@ -286,8 +302,15 @@ func main() {
 				http.Error(w, fmt.Sprintf("building reports: %v", err), http.StatusInternalServerError)
 				return
 			}
+			// The page takes the same filters as the document, in the URL:
+			// no scripts, and a filtered view is a link somebody can send.
+			ff, err := parseFindingFilter(r.URL.Query())
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			if err := view.HTML(w, wire.From(got), view.HTMLOptions{
+			if err := view.HTML(w, wire.From(got).FilterFindings(ff), view.HTMLOptions{
 				DollarRate: c.dollarRate,
 				Version:    buildinfo.Version,
 				Refresh:    pageRefresh(c.serveCache),
@@ -317,10 +340,16 @@ func main() {
 				http.Error(w, fmt.Sprintf("building reports: %v", err), http.StatusInternalServerError)
 				return
 			}
+			ff, err := parseFindingFilter(r.URL.Query())
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 			s := wire.From(got)
 			if filter {
 				s = s.ForUID(uid)
 			}
+			s = s.FilterFindings(ff)
 			w.Header().Set("Content-Type", "application/json")
 			if err := wire.Encode(w, s); err != nil {
 				fmt.Println("error: encoding the snapshot:", err)

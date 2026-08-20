@@ -261,6 +261,44 @@ func (s Snapshot) PodWide() bool {
 	return false
 }
 
+// FindingFilter narrows which findings a pass shows. A zero value keeps
+// everything.
+//
+// It touches findings only. The verdict table is what the cluster is doing
+// and stays whole - hiding rows because a rule name was typed would answer a
+// question nobody asked.
+type FindingFilter struct {
+	Rule  string // exact rule name, e.g. "no-time-limit"
+	JobID int    // 0 means every job
+}
+
+// Empty reports whether this filter would keep everything.
+func (f FindingFilter) Empty() bool { return f.Rule == "" && f.JobID == 0 }
+
+// FilterFindings applies the filter. Both terms must match when both are set.
+//
+// An unknown rule name yields an empty list rather than an error: a script
+// that greps for a rule the cluster has not tripped wants zero findings, not
+// a failure, and a rule name is not a thing the server can validate without
+// pinning every rule name into the wire contract.
+func (s Snapshot) FilterFindings(f FindingFilter) Snapshot {
+	if f.Empty() {
+		return s
+	}
+	out := s
+	out.Findings = make([]Finding, 0, len(s.Findings))
+	for _, fi := range s.Findings {
+		if f.Rule != "" && fi.Rule != f.Rule {
+			continue
+		}
+		if f.JobID != 0 && fi.JobID != f.JobID {
+			continue
+		}
+		out.Findings = append(out.Findings, fi)
+	}
+	return out
+}
+
 // ForUID narrows a pass to one owner's jobs, and the findings about them.
 // The cluster-level facts stay: the queue, the timestamp and the engine
 // caveat describe the pass rather than a job, and "2 jobs waiting for 9

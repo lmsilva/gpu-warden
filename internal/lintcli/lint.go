@@ -23,15 +23,36 @@ import (
 	"github.com/lmsilva/squire/internal/slurmfacts"
 )
 
-// parseConfig builds the configuration for a check. It registers only the two
+// filter narrows which findings are printed. The same two terms squire and
+// squire-me take, spelled the same way, because a person who learned them on
+// one tool should not have to learn them again on the other.
+type filter struct {
+	rule string
+	job  int
+}
+
+func (f filter) keeps(fi lint.Finding) bool {
+	if f.rule != "" && fi.Rule != f.rule {
+		return false
+	}
+	if f.job != 0 && fi.JobID != f.job {
+		return false
+	}
+	return true
+}
+
+// parseConfig builds the configuration for a check. It registers only the
 // flags this mode uses, so the help text describes what the check does rather
 // than everything the squire binary can do.
-func parseConfig(name string, args []string) slurmcfg.Config {
+func parseConfig(name string, args []string) (slurmcfg.Config, filter) {
 	var c slurmcfg.Config
+	var f filter
 	fs := flag.NewFlagSet(name, flag.ExitOnError)
 	slurmcfg.Bind(fs, &c)
+	fs.StringVar(&f.rule, "rule", "", "show only findings from this rule, e.g. no-time-limit")
+	fs.IntVar(&f.job, "job", 0, "show only findings about this job id")
 	fs.Parse(args)
-	return c
+	return c, f
 }
 
 // Exit codes. Separating "found problems" from "could not check" matters for
@@ -60,7 +81,7 @@ func scope(checked, total int) string {
 // runLint is the CLI presenter over the pure engine. It reads slurmrestd and
 // nothing else - no Prometheus, no Kubernetes, no DCGM - which is why it works
 // on a cluster that has installed none of them.
-func runLint(ctx context.Context, sc *slurmapi.Client, out io.Writer) int {
+func runLint(ctx context.Context, sc *slurmapi.Client, f filter, out io.Writer) int {
 	jobs, err := sc.ListJobs(ctx)
 	if err != nil {
 		fmt.Fprintln(out, "error:", err)
@@ -87,6 +108,15 @@ func runLint(ctx context.Context, sc *slurmapi.Client, out io.Writer) int {
 		lj = append(lj, l)
 	}
 	findings := lint.CheckAll(lj, cluster)
+	if f.rule != "" || f.job != 0 {
+		kept := make([]lint.Finding, 0, len(findings))
+		for _, fi := range findings {
+			if f.keeps(fi) {
+				kept = append(kept, fi)
+			}
+		}
+		findings = kept
+	}
 	if len(findings) == 0 {
 		fmt.Fprintf(out, "checked %s, no findings\n", scope(checked, len(jobs)))
 		return exitClean
@@ -115,9 +145,9 @@ func runLint(ctx context.Context, sc *slurmapi.Client, out io.Writer) int {
 // Prometheus and Kubernetes clients, which a login node has no credentials
 // for - that separation is the whole reason this runs where users are.
 func Main(name string, args []string) int {
-	c := parseConfig(name, args)
+	c, f := parseConfig(name, args)
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	sc := slurmapi.NewClient(c.URL, c.Version, c.Token)
-	return runLint(ctx, sc, os.Stdout)
+	return runLint(ctx, sc, f, os.Stdout)
 }

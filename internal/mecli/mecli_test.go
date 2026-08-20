@@ -201,3 +201,48 @@ func TestRunReportsTheServersError(t *testing.T) {
 		t.Errorf("a dead server must exit %d, got %d", exitError, code)
 	}
 }
+
+// TestFiltersReachTheServer: the client asks for less rather than receiving
+// everything and hiding some of it. That is the same rule the owner filter
+// follows, and it is what lets an authenticated server enforce the narrowing
+// it already applies.
+func TestFiltersReachTheServer(t *testing.T) {
+	var asked []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asked = append(asked, r.URL.RawQuery)
+		s := wire.From(pass())
+		if raw := r.URL.Query().Get("uid"); raw != "" {
+			uid, _ := strconv.Atoi(raw)
+			s = s.ForUID(uid)
+		}
+		jobID, _ := strconv.Atoi(r.URL.Query().Get("job"))
+		s = s.FilterFindings(wire.FindingFilter{Rule: r.URL.Query().Get("rule"), JobID: jobID})
+		w.Header().Set("Content-Type", "application/json")
+		if err := wire.Encode(w, s); err != nil {
+			t.Errorf("encode: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	var out, errOut bytes.Buffer
+	code := run(config{url: srv.URL, rule: "no-such-rule"}, 50000, &out, &errOut)
+	if code != exitClean {
+		t.Errorf("a filter that matches nothing is clean, got %d: %s", code, errOut.String())
+	}
+	if !strings.Contains(asked[0], "rule=no-such-rule") || !strings.Contains(asked[0], "uid=50000") {
+		t.Errorf("both terms must reach the server, saw %q", asked[0])
+	}
+	// The table still shows the owner's jobs - filtering findings must not
+	// empty the table.
+	if !strings.Contains(out.String(), "train") {
+		t.Errorf("the job table stays whole:\n%s", out.String())
+	}
+
+	out.Reset()
+	if code := run(config{url: srv.URL, job: 101}, 50000, &out, &errOut); code != exitFindings {
+		t.Errorf("job 101 has a finding, want exit %d, got %d", exitFindings, code)
+	}
+	if !strings.Contains(asked[1], "job=101") {
+		t.Errorf("the job term must reach the server, saw %q", asked[1])
+	}
+}

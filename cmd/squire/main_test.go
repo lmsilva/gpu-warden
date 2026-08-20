@@ -142,3 +142,40 @@ func TestParseUID(t *testing.T) {
 		}
 	}
 }
+
+// TestParseFindingFilter: two optional terms, and a job number that must be a
+// real one. A rule name is passed through unchecked - the server cannot
+// validate it without pinning every rule name into the URL contract, and a
+// script asking for a rule nobody tripped wants an empty list.
+func TestParseFindingFilter(t *testing.T) {
+	cases := []struct {
+		query   string
+		rule    string
+		job     int
+		wantErr bool
+	}{
+		{"", "", 0, false},
+		{"rule=no-time-limit", "no-time-limit", 0, false},
+		{"job=101", "", 101, false},
+		{"rule=no-time-limit&job=101", "no-time-limit", 101, false},
+		{"rule=no-such-rule", "no-such-rule", 0, false},
+		{"job=", "", 0, false},
+		{"job=0", "", 0, true},
+		{"job=-1", "", 0, true},
+		{"job=train", "", 0, true},
+	}
+	for _, c := range cases {
+		q, err := url.ParseQuery(c.query)
+		if err != nil {
+			t.Fatalf("bad case %q: %v", c.query, err)
+		}
+		f, err := parseFindingFilter(q)
+		if (err != nil) != c.wantErr {
+			t.Errorf("%q: err = %v, want error %v", c.query, err, c.wantErr)
+			continue
+		}
+		if err == nil && (f.Rule != c.rule || f.JobID != c.job) {
+			t.Errorf("%q: got %+v, want rule %q job %d", c.query, f, c.rule, c.job)
+		}
+	}
+}
