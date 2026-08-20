@@ -251,8 +251,10 @@ func TestForUIDKeepsOnlyTheOwner(t *testing.T) {
 	}
 }
 
-// TestForUIDFollowsTheFindings: a finding about a filtered-out job would name
-// a job the document does not show.
+// TestForUIDFollowsTheFindings: findings follow their own owner, not the job
+// table. Someone else's finding goes; a finding about a job of yours that has
+// no row - a pending one, or one holding no card - stays, because that is
+// exactly what a user needs to see and cannot see anywhere else.
 func TestForUIDFollowsTheFindings(t *testing.T) {
 	mine := measured()
 	theirs := measured()
@@ -261,14 +263,40 @@ func TestForUIDFollowsTheFindings(t *testing.T) {
 
 	s := From(cycle.Snapshot{
 		Reports: []report.JobReport{mine, theirs},
+		Jobs: []slurmapi.Job{
+			{JobID: 101, Name: "train", UserID: slurmapi.NoVal{Set: true, Number: 50000}},
+			{JobID: 200, Name: "theirs", UserID: slurmapi.NoVal{Set: true, Number: 50001}},
+			// Mine, and holding no card, so it is never in the table.
+			{JobID: 300, Name: "cpu-job", UserID: slurmapi.NoVal{Set: true, Number: 50000}},
+		},
 		Findings: []lint.Finding{
 			{JobID: 101, Rule: "a", Severity: lint.Note, Message: "kept"},
 			{JobID: 200, Rule: "b", Severity: lint.Warn, Message: "dropped"},
 		},
+		ConfigFindings: []lint.Finding{
+			{JobID: 300, Rule: "no-time-limit", Severity: lint.Warn, Message: "kept too"},
+		},
 	})
 	got := s.ForUID(50000)
-	if len(got.Findings) != 1 || got.Findings[0].JobID != 101 {
-		t.Errorf("want the finding about job 101 alone, got %+v", got.Findings)
+	if len(got.Findings) != 2 {
+		t.Fatalf("want my two findings, got %+v", got.Findings)
+	}
+	if got.Findings[0].JobID != 101 || got.Findings[1].JobID != 300 {
+		t.Errorf("want jobs 101 and 300, got %+v", got.Findings)
+	}
+	// Job 300 holds no card, so it is not in the table - and its finding is
+	// still here. This is the case the filter used to drop.
+	for _, j := range got.Jobs {
+		if j.ID == 300 {
+			t.Fatal("a job with no card must not be in the verdict table")
+		}
+	}
+	// A finding whose owner Slurm never sent matches nobody.
+	orphan := From(cycle.Snapshot{
+		Findings: []lint.Finding{{JobID: 9, Rule: "c", Severity: lint.Warn}},
+	})
+	if len(orphan.ForUID(50000).Findings) != 0 {
+		t.Error("a finding with no owner must not be shown to anyone")
 	}
 }
 

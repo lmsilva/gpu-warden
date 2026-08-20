@@ -68,6 +68,15 @@ func pass() cycle.Snapshot {
 		},
 		Findings: []lint.Finding{{JobID: 101, Rule: "gpu-requested-never-touched",
 			Severity: lint.Warn, Message: "its 2 GPUs have done no work"}},
+		// The job list every real pass carries. Findings are matched to an
+		// owner through it, so a fixture without it cannot exercise the
+		// owner filter honestly.
+		Jobs: []slurmapi.Job{
+			{JobID: 101, Name: "train", UserName: "ana",
+				UserID: slurmapi.NoVal{Set: true, Number: 50000}},
+			{JobID: 200, Name: "infer", UserName: "bo",
+				UserID: slurmapi.NoVal{Set: true, Number: 50001}},
+		},
 		Queue: report.Queue{PendingGPUJobs: 1, PendingGPUs: 1},
 		At:    time.Date(2026, 8, 18, 14, 5, 9, 0, time.UTC),
 	}

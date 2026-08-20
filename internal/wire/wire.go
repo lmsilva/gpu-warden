@@ -121,8 +121,13 @@ const (
 // not contain, so a consumer that tried to look the name up there would find
 // nothing - the document has to be readable on its own.
 type Finding struct {
-	JobID    int    `json:"job_id"`
-	JobName  string `json:"job_name"`
+	JobID   int    `json:"job_id"`
+	JobName string `json:"job_name"`
+	// JobUID is the owner of the job this finding is about, null when Slurm
+	// did not send one. The owner filter reads it: a finding can be about a
+	// job that is not in the jobs list, and matching on that list would drop
+	// every finding a user most needs to see.
+	JobUID   *int   `json:"job_uid"`
 	Kind     string `json:"kind"`
 	Rule     string `json:"rule"`
 	Severity string `json:"severity"`
@@ -150,13 +155,18 @@ func From(s cycle.Snapshot) Snapshot {
 	// Names come from the whole job list, not from the jobs above: a
 	// configuration finding can be about a job that holds no card.
 	names := make(map[int]string, len(s.Jobs))
+	uids := make(map[int]*int, len(s.Jobs))
 	for _, j := range s.Jobs {
 		names[j.JobID] = j.Name
+		if j.UserID.Set {
+			uids[j.JobID] = ptr(int(j.UserID.Number))
+		}
 	}
 	findings := make([]Finding, 0, len(s.Findings)+len(s.ConfigFindings))
 	for _, f := range s.Findings {
 		findings = append(findings, Finding{
-			JobID: f.JobID, JobName: names[f.JobID], Kind: KindAllocation,
+			JobID: f.JobID, JobName: names[f.JobID], JobUID: uids[f.JobID],
+			Kind: KindAllocation,
 			Rule: f.Rule, Severity: f.Severity.String(), Message: f.Message,
 		})
 	}
@@ -164,7 +174,8 @@ func From(s cycle.Snapshot) Snapshot {
 	// every reader gets the same one without sorting anything itself.
 	for _, f := range s.ConfigFindings {
 		findings = append(findings, Finding{
-			JobID: f.JobID, JobName: names[f.JobID], Kind: KindConfiguration,
+			JobID: f.JobID, JobName: names[f.JobID], JobUID: uids[f.JobID],
+			Kind: KindConfiguration,
 			Rule: f.Rule, Severity: f.Severity.String(), Message: f.Message,
 		})
 	}
@@ -320,7 +331,11 @@ func (s Snapshot) ForUID(uid int) Snapshot {
 	}
 	out.Findings = make([]Finding, 0, len(s.Findings))
 	for _, f := range s.Findings {
-		if kept[f.JobID] {
+		// Match on the finding's own owner, not on the jobs kept above. A
+		// configuration finding is about a job that holds no card, so it is
+		// never in that list - and dropping it would hide from a user
+		// exactly the findings they can act on.
+		if f.JobUID != nil && *f.JobUID == uid {
 			out.Findings = append(out.Findings, f)
 		}
 	}
