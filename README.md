@@ -60,11 +60,14 @@ Every verdict carries a **confidence** (`high` / `medium` / `low`) and the evide
 
 ## Job checks: what a job asked for
 
-`squire-lint` reads three slurmrestd endpoints — jobs, nodes, partitions — and writes nothing anywhere. It needs no telemetry stack at all, which is the point: it works on a cluster that has installed none of it.
+These checks run in two places now. `squire-lint` reads three slurmrestd endpoints — jobs, nodes, partitions — and writes nothing anywhere; it needs no telemetry stack at all, which is the point: it works on a cluster that has installed none of it. `squire` runs the same checks inside its monitoring pass and shows them on the web view and in `/snapshot.json`, so the two cannot report different things about one job.
+
+Unlike the allocation checks below, these cover **every job Slurm knows about** — including jobs holding no GPU and jobs that have not started. So a finding here can name a job that has no row in the verdict table.
 
 | Rule | Severity | Fires when |
 |---|---|---|
 | `dependency-doomed` | warn | Slurm's own `state_reason` is `DependencyNeverSatisfied` |
+| `unsatisfiable-request` | warn | The job asks each node for more GPUs than any node in its partition has |
 | `no-time-limit` | warn | No wall-clock limit, or an unlimited one — the scheduler cannot backfill around either |
 | `time-limit-at-partition-max` | note | The limit is exactly the partition ceiling, usually the default rather than an estimate |
 | `cpu-only-on-gpu-node` | warn | A job holding no GPUs occupies a node that has them |
@@ -75,6 +78,8 @@ Every verdict carries a **confidence** (`high` / `medium` / `low`) and the evide
 `warn` is worth fixing. `note` is worth knowing. Two levels rather than five, because more invites arguing about the grade instead of the finding.
 
 **Three rules cover the same damage through different resources.** Exclusivity, memory and cores each leave GPUs allocated and unschedulable, and each is invisible in every aggregate because the node reads as fully allocated. They are separate rules because the remedy differs: drop or narrow `--exclusive`, pass `--mem`, pass `-c`. One combined rule would have to name all three fixes and would be right about one.
+
+**`unsatisfiable-request` catches a job that can never start.** Slurm accepts a request for more cards per node than any node in the partition has, queues it, and reports the pending reason as resources — the same word a job waiting behind a busy queue gets. The two are indistinguishable to the person watching, and one of them will wait forever. Only the per-node card count is compared: processors and memory are reported as job-wide totals, and a job spread over four nodes may legitimately ask for more of either than one node has.
 
 **Exclusivity has three forms** — `--exclusive`, `--exclusive=user`, `--exclusive=mcs` — and all three strand the same GPUs. The finding says who is shut out, because that decides which remedy applies.
 
@@ -290,6 +295,17 @@ Rows come in the order Slurm returns them, the same order as the table. Sorting 
 
 There is no JavaScript and nothing is fetched from anywhere. Cluster networks routinely have no route to the internet, and a dashboard whose layout depends on a CDN is a dashboard that renders broken exactly where it is needed. It follows the browser's light or dark setting; both are read directly rather than through one set of colours compromising between them.
 
+#### Narrowing the page
+
+The web view takes the same two terms in the address, so a filtered view is a link you can send to somebody:
+
+```
+http://localhost:9101/?rule=no-time-limit
+http://localhost:9101/?job=1042
+```
+
+They narrow the findings only — the job table stays whole, because hiding rows would answer a question nobody asked. There is no JavaScript involved: the server sends a smaller page.
+
 #### Nothing on this port is authenticated
 
 Neither surface asks for a credential, and that is a decision rather than an omission.
@@ -385,14 +401,30 @@ lmsilva@PANDAMONIUM:~/squire$ kubectl -n $NS run squire-lint --rm -i --restart=N
 
 Nothing here is specific to any Slurm operator — a reachable slurmrestd and a token is the whole requirement. For a recurring check, the same `command` in a `CronJob` gives you a nightly report.
 
+#### Narrowing what you see
+
+`--rule` shows one rule, `--job` shows one job, and both together are an AND. The same two terms work on `squire-me` and as query parameters on the web view, so a person who learned them on one tool does not have to learn them again on the other.
+
+```bash
+squire-lint --rule no-time-limit
+```
+
+A rule nobody has tripped prints nothing and exits `0`. It is not an error: a script asking for a rule that did not fire wants an empty answer.
+
 #### Options
 ```
 lmsilva@PANDAMONIUM:~/squire$ go run ./cmd/squire-lint -h
 Usage of squire-lint:
+  -job int
+    	show only findings about this job id
+  -rule string
+    	show only findings from this rule, e.g. no-time-limit
   -slurm-api string
-        slurmrestd API version (default "v0.0.44")
+    	slurmrestd API version (default "v0.0.44")
+  -slurm-token-file string
+    	read the Slurm token from this file on every request instead of from SLURM_JWT
   -slurm-url string
-        slurmrestd base URL (default "http://localhost:6820")
+    	slurmrestd base URL (default "http://localhost:6820")
 ```
 
 ## Using squire-me
@@ -407,7 +439,24 @@ JOBID  NAME   USER  GPUS  ELAPSED  AVG%  PEAK%  GPU-MEM        WASTED-GPU-H  ACT
 1042   train  luis  2     1h30m0s  94    100    4.0/15G (27%)  0.2           healthy:medium  right-sized
 ```
 
+**Findings come with it, in two blocks.** Allocation findings are about the jobs in the table; configuration findings are about what your jobs asked for, and those cover jobs the table cannot show — a job that holds no GPU, or one that has not started. So a table with no rows and a CONFIGURATION block below it is a normal, useful answer:
+
+```
+lmsilva@login-0:~$ squire-me
+JOBID  NAME  USER  GPUS  ELAPSED  AVG%  PEAK%  GPU-MEM  WASTED-GPU-H  ACTIVITY  SIZING
+
+CONFIGURATION
+JOBID  NAME  SEVERITY  RULE           FINDING
+225    wrap  warn      no-time-limit  no time limit set - the scheduler cannot backfill around a job with no end
+```
+
 Your own jobs, decided by your uid. `--user someone` or `--uid 50000` looks at somebody else's — the server does not verify whose jobs you may see, exactly as on the dashboard, so this is a filter rather than a permission. `--wide` adds LIT, FIRST-WORK and WHY; `--dollar-rate` prices the waste, both exactly as in `squire`'s own table. Point it somewhere with `--url` once, or site-wide with `SQUIRE_URL` in a `profile.d` line.
+
+`--rule` and `--job` narrow the findings, not the table: your jobs still all appear, and only the matching findings are listed. The terms are sent to the server, which filters and returns less — the same way `--user` works, so a later authenticated server enforces the same narrowing.
+
+```bash
+squire-me --rule gpu-requested-never-touched
+```
 
 `--user` is resolved locally, and the binary is built without cgo, so a name that exists only in LDAP will not resolve on a node that does not put it in `/etc/passwd` — the error says so and `--uid` always works.
 
@@ -437,8 +486,12 @@ lmsilva@PANDAMONIUM:~/squire$ go run ./cmd/squire-me -h
 Usage of squire-me:
   -dollar-rate float
     	cost per wasted GPU-hour, shown next to the hours
+  -job int
+    	show only findings about this job id
   -json
     	print the server's JSON document instead of the table
+  -rule string
+    	show only findings from this rule, e.g. no-time-limit
   -uid int
     	show this numeric uid's jobs instead of your own
   -url string
@@ -513,6 +566,7 @@ A build that was not stamped says `dev`, which is the truthful answer rather tha
 - Verdict state names, like `zombie` and `over-provisioned`
 - The Kubernetes Event reason, `GPUAllocationIdle`
 - The `/snapshot.json` document: its field names and its `schema` number, which increments on any break
+- Rule names, which are what `--rule` and `?rule=` match on
 
 **Deliberately not covered: the wording of findings, table layout, and anything about the web page.** Those get better with use, and freezing them would help nobody. Script against rule identifiers and metric names, never against message text or HTML.
 

@@ -137,6 +137,14 @@ kubectl -n $NS get pod -l app.kubernetes.io/name=squire \
   -o jsonpath='{.items[0].status.containerStatuses[0].imageID}'
 ```
 
+## Configuration findings need the node and partition lists
+
+Squire's pass now runs the configuration checks as well as the allocation ones, and some of those compare a request against the hardware — is this time limit the partition's ceiling, does any node have this many cards. Those need two more reads of slurmrestd: the node list and the partition list.
+
+Both are optional. If either read fails, the pass still completes, the checks that only read a job's own request still run, and the page and the table say the lists could not be read. A shorter list of findings with no explanation would read as a clean cluster, which is the failure this note exists to prevent.
+
+With `PrivateData=nodes` or `PrivateData=partitions` set, the same account rule as for jobs applies: Squire's own token must be privileged enough to see them, or those checks go quiet with the note above rather than silently.
+
 ## What identity Slurm needs
 
 Squire never authenticates a user and never maps a name to a uid itself — it prints and filters exactly what slurmrestd sends. Four requirements follow, all on the Slurm side, all visible as symptoms in Squire when missing.
