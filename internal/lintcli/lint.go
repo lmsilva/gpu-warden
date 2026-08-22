@@ -68,14 +68,23 @@ const (
 	exitError    = 2
 )
 
+// plural returns word with an s on it unless there is exactly one.
+func plural(n int, word string) string {
+	if n == 1 {
+		return word
+	}
+	return word + "s"
+}
+
 // scope describes how much of the queue was looked at. Slurm keeps finished
 // jobs in its response for MinJobAge and those are not checked, so a bare job
 // count would not match what the findings were drawn from.
 func scope(checked, total int) string {
 	if checked == total {
-		return fmt.Sprintf("%d jobs", total)
+		return fmt.Sprintf("%d %s", total, plural(total, "job"))
 	}
-	return fmt.Sprintf("%d of %d jobs (%d already finished)", checked, total, total-checked)
+	return fmt.Sprintf("%d of %d %s (%d already finished)",
+		checked, total, plural(total, "job"), total-checked)
 }
 
 // runLint is the CLI presenter over the pure engine. It reads slurmrestd and
@@ -133,7 +142,8 @@ func runLint(ctx context.Context, sc *slurmapi.Client, f filter, out io.Writer) 
 			f.JobID, names[f.JobID], f.Severity, f.Rule, f.Message)
 	}
 	w.Flush()
-	fmt.Fprintf(out, "\n%d findings across %s\n", len(findings), scope(checked, len(jobs)))
+	fmt.Fprintf(out, "\n%d %s across %s\n",
+		len(findings), plural(len(findings), "finding"), scope(checked, len(jobs)))
 	return exitFindings
 }
 

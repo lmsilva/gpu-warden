@@ -94,7 +94,7 @@ func TestExitCodes(t *testing.T) {
 		// A finished job is still in Slurm's response for MinJobAge. Judging it
 		// would accuse someone over an allocation they already gave back.
 		{name: "finished job is not judged", jobs: oneFinishedBadJob, nodes: someNodes, parts: someParts,
-			want: exitClean, wantOutput: "0 of 1 jobs"},
+			want: exitClean, wantOutput: "0 of 1 job"},
 	}
 	for _, tc := range cases {
 		var sb strings.Builder
@@ -138,5 +138,33 @@ func TestFilterNarrowsWhatIsPrinted(t *testing.T) {
 	if got := runLint(context.Background(), fakeSlurm(t, twoBadJobs, someNodes, someParts),
 		filter{rule: "no-such-rule"}, &sb2); got != exitClean {
 		t.Errorf("an unmatched rule is clean, got %d:\n%s", got, sb2.String())
+	}
+}
+
+// TestCountsReadAsEnglish covers the summary line's grammar. One finding
+// across one job read as "1 findings across 1 jobs" in v0.1.0, which is the
+// first thing a reader sees and the first thing they judge.
+func TestCountsReadAsEnglish(t *testing.T) {
+	for _, tc := range []struct {
+		n    int
+		word string
+		want string
+	}{
+		{0, "finding", "findings"},
+		{1, "finding", "finding"},
+		{2, "finding", "findings"},
+		{1, "job", "job"},
+		{3, "job", "jobs"},
+	} {
+		if got := plural(tc.n, tc.word); got != tc.want {
+			t.Errorf("plural(%d, %q) = %q, want %q", tc.n, tc.word, got, tc.want)
+		}
+	}
+
+	if got := scope(1, 1); got != "1 job" {
+		t.Errorf("scope(1, 1) = %q, want %q", got, "1 job")
+	}
+	if got := scope(1, 2); got != "1 of 2 jobs (1 already finished)" {
+		t.Errorf("scope(1, 2) = %q", got)
 	}
 }
