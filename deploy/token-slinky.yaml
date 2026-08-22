@@ -32,8 +32,9 @@ spec:
   # nothing. That is the one case for a privileged account, and it should be
   # a decision rather than a default.
   #
-  # Note "slurm" does not work: a token minted for the SlurmUser is refused
-  # on authenticated endpoints with 511 while /ping still answers 200.
+  # Note "slurm" works but is a poor choice: the SlurmUser's token is exempt
+  # from PrivateData restrictions, so it sees every job on the cluster, and
+  # it carries that account's full powers for the same reason root does.
   #username: REPLACE_WITH_A_SLURM_ACCOUNT
   username: luis
 
@@ -45,9 +46,14 @@ spec:
   # lifetime here would simply stop working.
   #
   # An expired token is visible rather than silent: /metrics starts failing,
-  # the readiness probe fails with it, and the pod leaves the Service. Fixing
-  # it is deleting and reapplying this resource; Squire picks the new token up
-  # on its next request without a restart.
+  # the readiness probe fails with it, and the pod leaves the Service.
+  #
+  # To replace it, delete this resource AND the Secret it names. The Secret
+  # belongs to the cluster's signing key rather than to this resource, so
+  # deleting this alone leaves the old value behind and the re-created
+  # resource adopts it. Squire picks the new token up on its next request
+  # without a restart. See docs/deployment.md for the direct patch, which
+  # works in every case.
   #
   # Shorten this if you have something that reissues on a schedule.
   lifetime: 8760h
@@ -56,3 +62,4 @@ spec:
   secretRef:
     name: squire-slurm-token
     key: SLURM_JWT
+    

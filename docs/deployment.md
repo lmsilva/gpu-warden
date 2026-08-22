@@ -86,7 +86,7 @@ That is the reason for `--slurm-token-file`. A token in an environment variable 
 
 The exception is a site running `PrivateData=jobs`, where an ordinary account sees only its own jobs and Squire's output collapses to almost nothing — correctly, and uselessly. That is the one case for a privileged account, and it should be a decision rather than a default.
 
-Note that `slurm` does not work: a token minted for the SlurmUser is refused on authenticated endpoints with `511` while `/ping` still answers `200`.
+Note that `slurm` works but is a poor choice: the SlurmUser's token is exempt from `PrivateData` restrictions, so it sees every job on the cluster, and it carries that account's full powers for the same reason `root` does.
 
 ### Creating it
 
@@ -124,7 +124,7 @@ kubectl -n $NS patch secret squire-slurm-token \
   -p "{\"stringData\":{\"SLURM_JWT\":\"$(scontrol token username=squire lifespan=infinite | cut -d= -f2)\"}}"
 ```
 
-Or, where the operator minted it, delete and re-apply the `Token` resource.
+Where the operator minted it, delete the `Token` **and** its Secret. The Secret belongs to the cluster's signing key rather than to the `Token`, so deleting the `Token` on its own leaves the old value in place and the re-created `Token` adopts it — the operator only replaces a value it can read as expired. The patch above works in every case.
 
 ### Running a branch build
 
