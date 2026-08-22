@@ -77,6 +77,8 @@ Unlike the allocation checks below, these cover **every job Slurm knows about** 
 
 `warn` is worth fixing. `note` is worth knowing. Two levels rather than five, because more invites arguing about the grade instead of the finding.
 
+**`no-time-limit` reads what the scheduler reports.** A job that has not started, and a job the main scheduler started, report the limit as the user left it. A job the backfill scheduler started carries a limit Slurm assigned it — a year, where the partition is unlimited — and the rule treats that as a real limit, because the API does not say who set it.
+
 **Three rules cover the same damage through different resources.** Exclusivity, memory and cores each leave GPUs allocated and unschedulable, and each is invisible in every aggregate because the node reads as fully allocated. They are separate rules because the remedy differs: drop or narrow `--exclusive`, pass `--mem`, pass `-c`. One combined rule would have to name all three fixes and would be right about one.
 
 **`unsatisfiable-request` catches a job that can never start.** Slurm accepts a request for more cards per node than any node in the partition has, queues it, and reports the pending reason as resources — the same word a job waiting behind a busy queue gets. The two are indistinguishable to the person watching, and one of them will wait forever. Only the per-node card count is compared: processors and memory are reported as job-wide totals, and a job spread over four nodes may legitimately ask for more of either than one node has.
